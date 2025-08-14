@@ -279,25 +279,25 @@ if __name__ == "__main__":
     W2010, X2010, gamma2010, kept2010 = usvt_best_denoise_and_embed(
         A2010, GAMMAS, cut=True, vmin=0.0, vmax=1.0,
         energy_keep=ENERGY_KEEP, d_max=D_MAX, verbose=True,
-        save_each=None  # e.g., "usvt_outputs/2010_candidates"
+        save_each=None  # e.g., "usvt_C2_v2/2010_candidates"
     )
-    np.save("usvt_outputs/W_2010.npy", W2010)
-    np.save("usvt_outputs/X_2010.npy", X2010)
+    np.save("usvt_C2_v2/W_2010.npy", W2010)
+    np.save("usvt_C2_v2/X_2010.npy", X2010)
 
     # Compare 2011..2020 to 2010 via Sliced W2
     results = {}
     for year in range(2011, 2021):
         print(f"\n=== Processing year {year} ===")
         A_year = build_dense_adj_for_year(year)
-        save_dir = None  # e.g., f"usvt_outputs/{year}_candidates"; os.makedirs(save_dir, exist_ok=True)
+        save_dir = None  # e.g., f"usvt_C2_v2/{year}_candidates"; os.makedirs(save_dir, exist_ok=True)
 
         W_y, X_y, gamma_y, kept_y = usvt_best_denoise_and_embed(
             A_year, GAMMAS, cut=True, vmin=0.0, vmax=1.0,
             energy_keep=ENERGY_KEEP, d_max=D_MAX, verbose=True,
             save_each=save_dir
         )
-        np.save(f"usvt_outputs/W_{year}.npy", W_y)
-        np.save(f"usvt_outputs/X_{year}.npy", X_y)
+        np.save(f"usvt_C2_v2/W_{year}.npy", W_y)
+        np.save(f"usvt_C2_v2/X_{year}.npy", X_y)
 
         # Sliced W2 distance to baseline latent positions
         # dist = sliced_w2_distance(X2010, X_y, n_projections=256, n_quantiles=512, seed=42)
@@ -317,9 +317,9 @@ if __name__ == "__main__":
         print(f"[{year}] Sliced W2 to 2010: {dist:.6f} (best gamma={gamma_y:.4f}; kept dims={len(kept_y)})")
 
     # Save the summary table
-    np.save("usvt_outputs/sliced_W2_results.npy", results)
+    np.save("usvt_C2_v2/sliced_W2_results.npy", results)
     # Also write a human-readable text file
-    with open("usvt_outputs/sliced_W2_results.txt", "w") as f:
+    with open("usvt_C2_v2/sliced_W2_results.txt", "w") as f:
         for y in range(2011, 2021):
             r = results[y]
             f.write(f"{y}\tW2={r['sliced_W2_to_2010']:.6f}\tgamma={r['best_gamma']:.4f}\tdims={len(r['kept_eigs'])}\n")
