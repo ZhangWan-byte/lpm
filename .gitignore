@@ -1,0 +1,14 @@
+*.npy
+*.pth
+*.png
+/dataset
+/legacy
+/output
+/output_C3
+/output_C3_new_0807
+/output_C3_new_0807_no2
+/output_C3_new_0810_mle
+/output_rebuttal_mle_C1C2
+/preprocessed_data
+/usvt_C2_v1
+/usvt_C2_v2
