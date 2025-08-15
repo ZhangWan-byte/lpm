@@ -75,7 +75,7 @@ def gram_to_latent_positions(W_hat_t, d_max=None, energy=None, eps=1e-10):
     if evals.numel() == 0:
         # fallback: everything was suppressed; return zeros with 1 dim
         n = W_hat_t.shape[0]
-        return np.zeros((n, 1), dtype=np.float32), np.array([], dtype=np.float32)
+        return np.zeros((n, 1), dtype=np.float64), np.array([], dtype=np.float64)
 
     # sort descending (largest signal first)
     idx = torch.argsort(evals, descending=True)
@@ -96,7 +96,7 @@ def gram_to_latent_positions(W_hat_t, d_max=None, energy=None, eps=1e-10):
     evecs_k = evecs[:, :k]
     X = evecs_k * torch.sqrt(torch.clamp(evals_k, min=0.0))
 
-    return X.cpu().numpy().astype(np.float32), evals_k.cpu().numpy().astype(np.float32)
+    return X.cpu().numpy().astype(np.float64), evals_k.cpu().numpy().astype(np.float64)
 
 # -----------------------------
 # New: Sliced Wasserstein distance (rotation-robust)
@@ -150,8 +150,8 @@ def sliced_w2_distance_numpy(X, Y, n_projections=256, n_quantiles=512, seed=0):
     Rotation-robust Sliced W2 using random 1D projections (NumPy fallback).
     Handles different feature dims by zero-padding to a common dim first.
     """
-    X = np.asarray(X, dtype=np.float32)
-    Y = np.asarray(Y, dtype=np.float32)
+    X = np.asarray(X, dtype=np.float64)
+    Y = np.asarray(Y, dtype=np.float64)
     X, Y, d = _pad_to_common_dim(X, Y)
 
     rng = np.random.RandomState(seed)
@@ -184,8 +184,8 @@ def sliced_w2_distance_pot(X, Y, n_projections=256, seed=0):
     except Exception:
         return None  # will trigger fallback
 
-    X = np.asarray(X, dtype=np.float32)
-    Y = np.asarray(Y, dtype=np.float32)
+    X = np.asarray(X, dtype=np.float64)
+    Y = np.asarray(Y, dtype=np.float64)
     X, Y, _ = _pad_to_common_dim(X, Y)
     # POT returns a distance (not squared); we keep that convention.
     return float(sliced_wasserstein_distance(X, Y, n_projections=n_projections, seed=seed))
@@ -214,14 +214,14 @@ def usvt_best_denoise_and_embed(A_t, gammas, cut=True, vmin=0.0, vmax=1.0,
     save_each: if a folder path is provided, saves each candidate W_hat as .npy (optional).
     """
     n = A_t.shape[0]
-    # rho = A_t.mean().item() if n > 0 else 1.0
-    # rho = max(rho, 1e-12)
-    # s, v = torch.linalg.eigh(A_t)
+    rho = A_t.mean().item() if n > 0 else 1.0
+    rho = max(rho, 1e-12)
+    s, v = torch.linalg.eigh(A_t)
 
-    rho = max(A_t.mean(), 1e-12)
-    evals, evecs = eigsh(A_t, k=32, which='LA')  # float32 if A is float32
-    s = torch.from_numpy(evals).to(torch.float32)
-    v = torch.from_numpy(evecs).to(torch.float32)
+    # rho = max(A_t.mean(), 1e-12)
+    # evals, evecs = eigsh(A_t, k=32, which='LA')  # float64 if A is float64
+    # s = torch.from_numpy(evals).to(torch.float64)
+    # v = torch.from_numpy(evecs).to(torch.float64)
 
     best_loss, best_W, best_gamma = np.inf, None, None
     if verbose:
@@ -264,13 +264,13 @@ if __name__ == "__main__":
     def build_dense_adj_for_year(year):
         sub_data = get_subgraph_by_year(data, year)
         n = sub_data.num_nodes
-        A_sparse = to_scipy_sparse_matrix(sub_data.edge_index, num_nodes=n).astype(np.float32)
+        A_sparse = to_scipy_sparse_matrix(sub_data.edge_index, num_nodes=n).astype(np.float64)
         A_sparse = 0.5 * (A_sparse + A_sparse.T)   # symmetrize
         A_sparse.setdiag(0.0)
         A_dense = A_sparse.toarray()
-        return torch.from_numpy(A_dense).to(dtype=torch.float32)
+        return torch.from_numpy(A_dense).to(dtype=torch.float64)
     
-    def build_sparse_adj_for_year(year, dtype=np.float32):
+    def build_sparse_adj_for_year(year, dtype=np.float64):
         sub_data = get_subgraph_by_year(data, year)
         n = sub_data.num_nodes
         A = to_scipy_sparse_matrix(sub_data.edge_index, num_nodes=n).astype(dtype)
@@ -291,8 +291,8 @@ if __name__ == "__main__":
     # Build baseline (2010)
     baseline_year = 2010
     print(f"=== Baseline year {baseline_year} ===")
-    # A2010 = build_dense_adj_for_year(baseline_year)
-    A2010 = build_sparse_adj_for_year(baseline_year, dtype=np.float32)
+    A2010 = build_dense_adj_for_year(baseline_year)
+    # A2010 = build_sparse_adj_for_year(baseline_year, dtype=np.float64)
     _, X2010, gamma2010, kept2010 = usvt_best_denoise_and_embed(
         A2010, GAMMAS, cut=True, vmin=0.0, vmax=1.0,
         energy_keep=ENERGY_KEEP, d_max=D_MAX, verbose=True,
@@ -305,8 +305,8 @@ if __name__ == "__main__":
     results = {}
     for year in range(2011, 2021):
         print(f"\n=== Processing year {year} ===")
-        # A_year = build_dense_adj_for_year(year)
-        A_year = build_sparse_adj_for_year(year, dtype=np.float32)
+        A_year = build_dense_adj_for_year(year)
+        # A_year = build_sparse_adj_for_year(year, dtype=np.float64)
         save_dir = None  # e.g., f"usvt_C2_v3/{year}_candidates"; os.makedirs(save_dir, exist_ok=True)
 
         _, X_y, gamma_y, kept_y = usvt_best_denoise_and_embed(
