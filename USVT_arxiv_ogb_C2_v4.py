@@ -310,6 +310,11 @@ if __name__ == "__main__":
     parser.add_argument("--device", type=str, help="Device to use (e.g., 'cuda' or 'cpu')")
     args = parser.parse_args()
 
+    import json
+    print(">>> Run configuration")
+    print(json.dumps(vars(args), indent=2, sort_keys=True), flush=True)
+
+
     # Device configuration
     device = torch.device(args.device)
 
