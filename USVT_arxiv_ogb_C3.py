@@ -324,7 +324,7 @@ if __name__ == "__main__":
     MAX_NODES = args.max_nodes
 
     # Output dirs
-    os.makedirs("usvt_C2_v4", exist_ok=True)
+    os.makedirs("usvt_C3", exist_ok=True)
 
     # Load data
     dataset = PygNodePropPredDataset(name='ogbn-arxiv')
@@ -355,10 +355,11 @@ if __name__ == "__main__":
 
         return torch.from_numpy(A_dense).to(device).type(torch.float64)
 
-    # Build baseline (2010)
-    baseline_year = 2010
-    print(f"=== Baseline year {baseline_year} ===")
-    A2010 = build_dense_adj_for_year(baseline_year, MAX_NODES, device, seed=args.seed)
+    # Build training set (2010-2015)
+    print(f"=== Training Set ===")
+
+    # class 0
+    A2010 = build_dense_adj_for_year(2010, MAX_NODES, device, seed=args.seed)
     X2010 = usvt_and_embed_gpu(
         A_t=A2010,
         gamma=GAMMA,
@@ -370,16 +371,33 @@ if __name__ == "__main__":
         dtype=torch.float64,
         return_numpy=True
     )
+    np.save("usvt_C3/X_2010.npy", X2010)
 
-    np.save("usvt_C2_v4/X_2010.npy", X2010)
+    # class 1
+    A2015 = build_dense_adj_for_year(2015, MAX_NODES, device, seed=args.seed)
+    X2015 = usvt_and_embed_gpu(
+        A_t=A2015,
+        gamma=GAMMA,
+        d_max=D_MAX,
+        energy=ENERGY_KEEP,
+        eps=1e-10,
+        verbose=True,
+        device=device,
+        dtype=torch.float64,
+        return_numpy=True
+    )
+    np.save("usvt_C3/X_2015.npy", X2015)
 
     # Compare 2011..2020 to 2010 via Sliced W2
     results = {}
-    for year in range(2011, 2021):
-        print(f"\n=== Processing year {year} ===")
-        A_year = build_dense_adj_for_year(year, MAX_NODES, device, seed=args.seed)
-        X_year = usvt_and_embed_gpu(
-            A_t=A_year,
+    for i in range(1, 5):
+        print(f"\n=== Processing test set {i} ===")
+
+        # class 0
+        year_0 = 2010 + i
+        A_year_0 = build_dense_adj_for_year(year_0, MAX_NODES, device, seed=args.seed)
+        X_year_0 = usvt_and_embed_gpu(
+            A_t=A_year_0,
             gamma=GAMMA,
             d_max=D_MAX,
             energy=ENERGY_KEEP,
@@ -389,30 +407,58 @@ if __name__ == "__main__":
             dtype=torch.float64,
             return_numpy=True
         )
-        np.save(f"usvt_C2_v4/X_{year}.npy", X_year)
+        np.save(f"usvt_C3/X_{year_0}.npy", X_year_0)
+
+        # class 1
+        year_1 = 2015 + i
+        A_year_1 = build_dense_adj_for_year(year_1, MAX_NODES, device, seed=args.seed)
+        X_year_1 = usvt_and_embed_gpu(
+            A_t=A_year_1,
+            gamma=GAMMA,
+            d_max=D_MAX,
+            energy=ENERGY_KEEP,
+            eps=1e-10,
+            verbose=True,
+            device=device,
+            dtype=torch.float64,
+            return_numpy=True
+        )
+        np.save(f"usvt_C3/X_{year_1}.npy", X_year_1)
 
         # Sliced W2 distance to baseline latent positions
-        dist = wasserstein_distance_between_embeddings(
-            X2010, X_year,
+        dist_0 = wasserstein_distance_between_embeddings(
+            X2010, X_year_0,
             n_projections=256,   # you can lower to 128 for speed
             n_quantiles=512,     # only used by the NumPy fallback
             seed=args.seed,
             use_pot=True         # tries POT first, then falls back
         )
 
-        results[year] = {
-            "sliced_W2_to_2010": float(dist)
+        dist_1 = wasserstein_distance_between_embeddings(
+            X2015, X_year_1,
+            n_projections=256,   # you can lower to 128 for speed
+            n_quantiles=512,     # only used by the NumPy fallback
+            seed=args.seed,
+            use_pot=True         # tries POT first, then falls back
+        )
+
+        results[f"test{i}"] = {
+            "sliced_W2_to_2010": float(dist_0),
+            "sliced_W2_to_2015": float(dist_1)
         }
-        print(f"[{year}] Sliced W2 to 2010: {dist:.6f}")
+        print(f"[test{i}] Sliced W2 to 2010: {dist_0:.6f}")
+        print(f"[test{i}] Sliced W2 to 2015: {dist_1:.6f}")
 
     # Save the summary table
-    np.save("usvt_C2_v4/sliced_W2_results.npy", results)
+    np.save("usvt_C3/sliced_W2_results.npy", results)
     # Also write a human-readable text file
-    with open("usvt_C2_v4/sliced_W2_results.txt", "w") as f:
-        for y in range(2011, 2021):
-            r = results[y]
-            f.write(f"{y}\tW2={r['sliced_W2_to_2010']:.6f}\n")
+    with open("usvt_C3/sliced_W2_results.txt", "w") as f:
+        for i in range(1, 5):
+            r = results[f"test{i}"]
+            f.write(f"test{i}\tW2={r['sliced_W2_to_2010']:.6f}\n")
+            f.write(f"test{i}\tW2={r['sliced_W2_to_2015']:.6f}\n")
 
     print("\n=== Done. Summary (Sliced W2 to 2010) ===")
-    for y in range(2011, 2021):
-        print(f"{y}: {results[y]['sliced_W2_to_2010']:.6f}")
+    for i in range(1, 5):
+        w_i = results[f'test{i}']['sliced_W2_to_2010'] + results[f'test{i}']['sliced_W2_to_2015']
+        print(f"[test{i}] Sliced W2 to training set: {w_i:.6f}")
