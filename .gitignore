@@ -1,6 +1,7 @@
 *.npy
 *.pth
 *.png
+/__pycache__/
 /dataset
 /legacy
 /output
