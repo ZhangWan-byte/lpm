@@ -308,6 +308,7 @@ if __name__ == "__main__":
     parser.add_argument("--gamma", type=float, default=0.01, help="USVT threshold multiplier")
     parser.add_argument("--energy", type=float, default=None, help="Energy preservation ratio")
     parser.add_argument("--d_max", type=int, default=2, help="Maximum dimensionality")
+    parser.add_argument("--max_nodes", type=int, default=1000, help="Maximum number of nodes to use")
     parser.add_argument("--device", type=str, help="Device to use (e.g., 'cuda' or 'cpu')")
     args = parser.parse_args()
 
@@ -318,6 +319,7 @@ if __name__ == "__main__":
     GAMMA = args.gamma
     ENERGY_KEEP = args.energy
     D_MAX = args.d_max
+    MAX_NODES = args.max_nodes
 
     # Output dirs
     os.makedirs("usvt_C2_v4", exist_ok=True)
@@ -327,19 +329,35 @@ if __name__ == "__main__":
     data = dataset[0]
 
     # Helper to build dense symmetrized adjacency for a year
-    def build_dense_adj_for_year(year, device):
+    def build_dense_adj_for_year(year, max_nodes, device):
         sub_data = get_subgraph_by_year(data, year)
         n = sub_data.num_nodes
-        A_sparse = to_scipy_sparse_matrix(sub_data.edge_index, num_nodes=n).astype(np.float64)
+        
+        # Decide which nodes to keep (optionally downsample)
+        if n > max_nodes:
+            keep = np.random.choice(n, size=max_nodes, replace=False)
+
+            # Induce subgraph on the chosen nodes and relabel to [0, max_nodes-1]
+            keep_idx = torch.as_tensor(keep, dtype=torch.long)
+            sub_edge_index, _ = subgraph(keep_idx, sub_data.edge_index.cpu(), relabel_nodes=True)
+            edge_index = sub_edge_index
+            n_use = max_nodes
+        else:
+            edge_index = sub_data.edge_index.cpu()
+            n_use = n
+
+        A_sparse = to_scipy_sparse_matrix(edge_index, num_nodes=n_use).astype(np.float64)
         A_sparse = 0.5 * (A_sparse + A_sparse.T)   # symmetrize
         A_sparse.setdiag(0.0)
+        A_sparse.eliminate_zeros()  # remove zero entries
         A_dense = A_sparse.toarray()
+
         return torch.from_numpy(A_dense).to(device).type(torch.float64)
 
     # Build baseline (2010)
     baseline_year = 2010
     print(f"=== Baseline year {baseline_year} ===")
-    A2010 = build_dense_adj_for_year(baseline_year, device)
+    A2010 = build_dense_adj_for_year(baseline_year, MAX_NODES, device)
     X2010 = usvt_and_embed_gpu(
         A_t=A2010,
         gamma=GAMMA,
@@ -358,7 +376,7 @@ if __name__ == "__main__":
     results = {}
     for year in range(2011, 2021):
         print(f"\n=== Processing year {year} ===")
-        A_year = build_dense_adj_for_year(year, device)
+        A_year = build_dense_adj_for_year(year, MAX_NODES, device)
         X_year = usvt_and_embed_gpu(
             A_t=A_year,
             gamma=GAMMA,
