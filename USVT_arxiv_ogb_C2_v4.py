@@ -308,7 +308,7 @@ if __name__ == "__main__":
     parser.add_argument("--gamma", type=float, default=0.01, help="USVT threshold multiplier")
     parser.add_argument("--energy", type=float, default=None, help="Energy preservation ratio")
     parser.add_argument("--d_max", type=int, default=2, help="Maximum dimensionality")
-    parser.add_argument("--max_nodes", type=int, default=1000, help="Maximum number of nodes to use")
+    parser.add_argument("--max_nodes", type=int, default=20000, help="Maximum number of nodes to use")
     parser.add_argument("--device", type=str, help="Device to use (e.g., 'cuda' or 'cpu')")
     args = parser.parse_args()
 
