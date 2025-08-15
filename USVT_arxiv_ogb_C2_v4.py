@@ -300,22 +300,24 @@ def usvt_and_embed_gpu(
 # Main: baseline 2010 vs 2011-2020
 # -----------------------------
 if __name__ == "__main__":
-    # Reproducibility
-    np.random.seed(0)
-    torch.manual_seed(0)
-
+    # Argument parser for command-line options
     parser = argparse.ArgumentParser(description="USVT on OGB arXiv dataset")
     parser.add_argument("--gamma", type=float, default=0.01, help="USVT threshold multiplier")
     parser.add_argument("--energy", type=float, default=None, help="Energy preservation ratio")
     parser.add_argument("--d_max", type=int, default=2, help="Maximum dimensionality")
     parser.add_argument("--max_nodes", type=int, default=20000, help="Maximum number of nodes to use")
+    parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility")
     parser.add_argument("--device", type=str, help="Device to use (e.g., 'cuda' or 'cpu')")
     args = parser.parse_args()
 
     # Device configuration
     device = torch.device(args.device)
 
-     # USVT sweep grid (tweak if you like)
+    # Reproducibility
+    np.random.seed(args.seed)
+    torch.manual_seed(args.seed)
+
+    # USVT sweep grid (tweak if you like)
     GAMMA = args.gamma
     ENERGY_KEEP = args.energy
     D_MAX = args.d_max
@@ -329,15 +331,14 @@ if __name__ == "__main__":
     data = dataset[0]
 
     # Helper to build dense symmetrized adjacency for a year
-    def build_dense_adj_for_year(year, max_nodes, device):
+    def build_dense_adj_for_year(year, max_nodes, device, seed):
         sub_data = get_subgraph_by_year(data, year)
         n = sub_data.num_nodes
         
         # Decide which nodes to keep (optionally downsample)
         if n > max_nodes:
-            # rng = np.random.default_rng(seed=42)
-            # keep = rng.choice(n, size=max_nodes, replace=False).astype(np.int64)
-            keep = np.random.choice(n, size=max_nodes, replace=False).astype(np.int64)
+            rng = np.random.default_rng(seed=seed)
+            keep = rng.choice(n, size=max_nodes, replace=False).astype(np.int64)
             keep_idx = torch.from_numpy(keep)
             sub_edge_index, _ = subgraph(keep_idx, sub_data.edge_index, relabel_nodes=True, num_nodes=n)
             edge_index = sub_edge_index
@@ -357,7 +358,7 @@ if __name__ == "__main__":
     # Build baseline (2010)
     baseline_year = 2010
     print(f"=== Baseline year {baseline_year} ===")
-    A2010 = build_dense_adj_for_year(baseline_year, MAX_NODES, device)
+    A2010 = build_dense_adj_for_year(baseline_year, MAX_NODES, device, seed=args.seed)
     X2010 = usvt_and_embed_gpu(
         A_t=A2010,
         gamma=GAMMA,
@@ -376,7 +377,7 @@ if __name__ == "__main__":
     results = {}
     for year in range(2011, 2021):
         print(f"\n=== Processing year {year} ===")
-        A_year = build_dense_adj_for_year(year, MAX_NODES, device)
+        A_year = build_dense_adj_for_year(year, MAX_NODES, device, seed=args.seed)
         X_year = usvt_and_embed_gpu(
             A_t=A_year,
             gamma=GAMMA,
@@ -395,7 +396,7 @@ if __name__ == "__main__":
             X2010, X_year,
             n_projections=256,   # you can lower to 128 for speed
             n_quantiles=512,     # only used by the NumPy fallback
-            seed=42,
+            seed=args.seed,
             use_pot=True         # tries POT first, then falls back
         )
 
