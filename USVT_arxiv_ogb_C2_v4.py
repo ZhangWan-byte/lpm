@@ -3,6 +3,7 @@ import torch
 from torch_geometric.utils import to_scipy_sparse_matrix, subgraph
 from ogb.nodeproppred import PygNodePropPredDataset
 import os
+import argparse
 
 # -----------------------------
 # USVT bits (yours, with helpers)
@@ -303,8 +304,20 @@ if __name__ == "__main__":
     np.random.seed(0)
     torch.manual_seed(0)
 
+    parser = argparse.ArgumentParser(description="USVT on OGB arXiv dataset")
+    parser.add_argument("--gamma", type=float, default=0.01, help="USVT threshold multiplier")
+    parser.add_argument("--energy", type=float, default=None, help="Energy preservation ratio")
+    parser.add_argument("--d_max", type=int, default=2, help="Maximum dimensionality")
+    parser.add_argument("--device", type=str, help="Device to use (e.g., 'cuda' or 'cpu')")
+    args = parser.parse_args()
+
     # Device configuration
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = torch.device(args.device)
+
+     # USVT sweep grid (tweak if you like)
+    GAMMA = args.gamma
+    ENERGY_KEEP = args.energy
+    D_MAX = args.d_max
 
     # Output dirs
     os.makedirs("usvt_C2_v4", exist_ok=True)
@@ -322,15 +335,6 @@ if __name__ == "__main__":
         A_sparse.setdiag(0.0)
         A_dense = A_sparse.toarray()
         return torch.from_numpy(A_dense).to(device).type(torch.float64)
-
-    # USVT sweep grid (tweak if you like)
-    GAMMA = 0.01
-
-    # Choose embedding truncation:
-    # - use energy_keep=0.9 to keep enough components to explain 90% of positive-eigenvalue mass
-    # - or fix d_max, e.g., d_max=32
-    ENERGY_KEEP = None
-    D_MAX = 2  # set to an int (e.g., 32) if you want a fixed dimensionality cap
 
     # Build baseline (2010)
     baseline_year = 2010
