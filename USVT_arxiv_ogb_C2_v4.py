@@ -335,8 +335,9 @@ if __name__ == "__main__":
         
         # Decide which nodes to keep (optionally downsample)
         if n > max_nodes:
-            rng = np.random.default_rng(seed=42)
-            keep = rng.choice(n, size=max_nodes, replace=False).astype(np.int64)
+            # rng = np.random.default_rng(seed=42)
+            # keep = rng.choice(n, size=max_nodes, replace=False).astype(np.int64)
+            keep = np.random.choice(n, size=max_nodes, replace=False).astype(np.int64)
             keep_idx = torch.from_numpy(keep)
             sub_edge_index, _ = subgraph(keep_idx, sub_data.edge_index, relabel_nodes=True, num_nodes=n)
             edge_index = sub_edge_index
