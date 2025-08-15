@@ -205,7 +205,7 @@ def usvt_and_embed_gpu(
     verbose: bool = True,
     *,
     device: str | torch.device | None = None,
-    dtype: torch.dtype = torch.float32,
+    dtype: torch.dtype = torch.float64,
     return_numpy: bool = True
 ):
     """
@@ -219,7 +219,7 @@ def usvt_and_embed_gpu(
         eps: discard non-positive eigenvalues below this.
         verbose: log suppression stats.
         device: e.g. "cuda" or "cpu". If None, use A_t.device.
-        dtype: torch.float32 (default) or torch.float64 (slower on GPU).
+        dtype: torch.float64 (default) or torch.float64 (slower on GPU).
         return_numpy: if True, returns np.ndarray; else returns torch.Tensor on `device`.
 
     Returns:
@@ -238,7 +238,7 @@ def usvt_and_embed_gpu(
     rho = torch.clamp(rho, min=torch.tensor(1e-12, device=device, dtype=dtype))
 
     # ---- single eigendecomposition (ascending eigenvalues)
-    evals, evecs = torch.linalg.eigh(A_t)  # CUDA-supported for float32/64
+    evals, evecs = torch.linalg.eigh(A_t)  # CUDA-supported for float64/64
 
     # ---- USVT threshold (all on device)
     thr = torch.sqrt(rho * n_t) * float(gamma)  # gamma is Python float; cast once
@@ -344,7 +344,7 @@ if __name__ == "__main__":
         eps=1e-10,
         verbose=True,
         device=device,
-        dtype=torch.float32,
+        dtype=torch.float64,
         return_numpy=True
     )
 
@@ -363,7 +363,7 @@ if __name__ == "__main__":
             eps=1e-10,
             verbose=True,
             device=device,
-            dtype=torch.float32,
+            dtype=torch.float64,
             return_numpy=True
         )
         np.save(f"usvt_C2_v4/X_{year}.npy", X_year)
