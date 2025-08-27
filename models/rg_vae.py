@@ -20,7 +20,10 @@ class GraphConv(nn.Module):
 
 
 class NodeEncoder(nn.Module):
-    """Encodes observable node features (optionally concatenated with structural features) to q(z|⋅)."""
+    """
+    Encodes observable node features (optionally concatenated with structural features) to q(z|·).
+    Approximates f^{-1}: x_i -> z_i.
+    """
     def __init__(self, in_dim: int, hidden: int, latent_dim: int, layers: int = 2):
         super().__init__()
         self.gc1 = GraphConv(in_dim, hidden)
@@ -36,7 +39,7 @@ class NodeEncoder(nn.Module):
 
 
 # ---------------------------
-# Decoder zoo
+# Edge decoders (pairwise)
 # ---------------------------
 
 class RadialDecoder(nn.Module):
@@ -121,7 +124,6 @@ class DegreeCorrectedRadialDecoder(nn.Module):
         return self.core.logits(core_zi, core_zj) + s_i + s_j
 
 
-# Optional: Random Fourier Feature decoder (registered as "rff")
 class RFFDecoder(nn.Module):
     """Random Fourier Feature decoder: logit = bias + scale * φ(z_i)^T φ(z_j)."""
     def __init__(
@@ -188,32 +190,47 @@ class RFFDecoder(nn.Module):
 
 
 # ---------------------------
-# VAE wrapper
+# Feature decoder (node attributes)
+# ---------------------------
+
+class FeatureDecoderGaussian(nn.Module):
+    """
+    Decodes z_i -> parameters of p(x_i|z_i).
+    Here: Gaussian with mean MLP(z_i) and fixed unit variance (MSE loss).
+    """
+    def __init__(self, latent_dim: int, x_dim: int, hidden: int = 64):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(latent_dim, hidden), nn.ReLU(),
+            nn.Linear(hidden, hidden), nn.ReLU(),
+            nn.Linear(hidden, x_dim)
+        )
+
+    def forward(self, z: torch.Tensor) -> torch.Tensor:
+        return self.net(z)  # predicted mean
+
+
+# ---------------------------
+# VAE wrapper (two-branch decoder)
 # ---------------------------
 
 class RG_VAE(nn.Module):
     def __init__(
         self,
-        input_dim: int,                 # <<<<<<<<<< new: observed node feature dimension
+        input_dim: int,                 # observed node feature dimension (x)
         latent_dim: int = 16,
         hidden: int = 64,
         enc_layers: int = 2,
-        use_struct_feats: bool = False, # if True, concat simple structural features to observed features
-        decoder: str = "radial",
+        use_struct_feats: bool = False, # if True, concat simple structural features to observed x
+        decoder: str = "radial",        # edge decoder name
         decoder_kwargs: Optional[dict] = None,
+        feat_dec_hidden: int = 64,      # hidden width for feature decoder
     ):
         """
-        The encoder now approximates f^{-1}: observed node features -> latent positions.
-        Pass the observed node features (feats: [N, input_dim]) into elbo()/embed().
-
-        decoder choices:
-          - "radial" (default): bias - alpha * ||zi - zj||^2
-          - "dot": bias + scale * <zi, zj>
-          - "bilinear": bias + (W_out zi)·(W_in zj)
-          - "indefinite": bias + zi^T diag(s) zj
-          - "mlp": symmetric MLP on [|zi-zj|, zi*zj]
-          - "dc_radial": degree-corrected radial (last latent dim is degree log-factor)
-          - "rff": random Fourier feature inner-product decoder
+        Encoder approximates f^{-1}: x -> z.
+        Two-branch decoder:
+          (a) p(x|z): FeatureDecoderGaussian
+          (b) p(A|z_i,z_j): edge decoder family
         """
         super().__init__()
         self.latent_dim = latent_dim
@@ -223,11 +240,15 @@ class RG_VAE(nn.Module):
         enc_in = input_dim + self.struct_dim
         self.encoder = NodeEncoder(in_dim=enc_in, hidden=hidden, latent_dim=latent_dim, layers=enc_layers)
 
-        self.decoder_name = decoder.lower()
-        self.decoder = self._make_decoder(self.decoder_name, latent_dim, (decoder_kwargs or {}))
+        # Edge decoder
+        self.decoder_name = (decoder or "radial").lower()
+        self.decoder = self._make_edge_decoder(self.decoder_name, latent_dim, (decoder_kwargs or {}))
+
+        # Feature decoder (Gaussian)
+        self.feature_decoder = FeatureDecoderGaussian(latent_dim=latent_dim, x_dim=input_dim, hidden=feat_dec_hidden)
 
     @staticmethod
-    def _make_decoder(name: str, latent_dim: int, kwargs: dict) -> nn.Module:
+    def _make_edge_decoder(name: str, latent_dim: int, kwargs: dict) -> nn.Module:
         if name == "radial":
             return RadialDecoder(latent_dim)
         if name == "dot":
@@ -278,39 +299,71 @@ class RG_VAE(nn.Module):
         eps = torch.randn_like(std)
         return mu + eps * std
 
+    # ----- Edge branch -----
+
     def pair_logits(self, z: torch.Tensor, pairs: torch.Tensor) -> torch.Tensor:
         zi = z[pairs[:, 0]]
         zj = z[pairs[:, 1]]
         return self.decoder.logits(zi, zj)
 
-    def kl_normal(self, mu: torch.Tensor, logvar: torch.Tensor) -> torch.Tensor:
+    # ----- Losses -----
+
+    @staticmethod
+    def kl_normal(mu: torch.Tensor, logvar: torch.Tensor) -> torch.Tensor:
         # KL(q||p) for standard normal prior
         return 0.5 * torch.sum(torch.exp(logvar) + mu**2 - 1.0 - logvar)
+
+    @staticmethod
+    def gaussian_mse_loss(x_hat: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
+        # Fixed unit-variance Gaussian => MSE/2 up to constant; we use mean MSE for scale stability
+        return F.mse_loss(x_hat, x)
+
+    # ----- ELBO with two branches -----
 
     def elbo(
         self,
         A_norm: torch.Tensor,
         pos_pairs: torch.Tensor,
         neg_pairs: torch.Tensor,
-        feats: torch.Tensor,  # <<<<<<<<<< pass observed features here
+        feats: torch.Tensor,            # observed node features x
+        lambda_feat: float = 1.0,
+        lambda_kl: float = 1e-3,
     ) -> Tuple[torch.Tensor, Dict[str, float]]:
         mu, logvar = self.encode(A_norm, feats)
         z = self.reparameterize(mu, logvar)
+
+        # Edge reconstruction on pos+neg pairs
         pairs = torch.cat([pos_pairs, neg_pairs], dim=0)
         labels = torch.cat(
             [torch.ones(pos_pairs.size(0), device=z.device),
              torch.zeros(neg_pairs.size(0), device=z.device)]
         )
         logits = self.pair_logits(z, pairs)
-        recon = bce_logits(logits, labels)
+        recon_edge = bce_logits(logits, labels)
+
+        # Feature reconstruction
+        x_hat = self.feature_decoder(z)
+        recon_feat = self.gaussian_mse_loss(x_hat, feats)
+
+        # KL
         kl = self.kl_normal(mu, logvar) / mu.size(0)  # average per node
-        loss = recon + 1e-3 * kl
-        return loss, {"recon": float(recon.item()), "kl": float(kl.item()), "decoder": self.decoder_name}
+
+        # Total
+        loss = recon_edge + lambda_feat * recon_feat + lambda_kl * kl
+        stats = {
+            "recon_edge": float(recon_edge.item()),
+            "recon_feat": float(recon_feat.item()),
+            "kl": float(kl.item()),
+            "decoder": self.decoder_name,
+        }
+        return loss, stats
+
+    # ----- Embedding -----
 
     def embed(self, A_norm: torch.Tensor, feats: Optional[torch.Tensor] = None) -> torch.Tensor:
         """
-        Returns posterior mean embeddings. If feats is None, uses only structural features
-        (kept for backward compatibility), but for Experiment 1 you should pass node features.
+        Posterior mean embeddings μ. For Exp1, pass node features (x).
+        If feats is None and use_struct_feats=True, returns μ using only structural features (fallback).
         """
         if feats is None:
             x = self.structural_features(A_norm) if self.use_struct_feats else torch.zeros(
