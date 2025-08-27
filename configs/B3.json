@@ -1,0 +1,12 @@
+{
+  "name": "B3_Heterophily_indefinite",
+  "seed": 126,
+  "graph": { "N": 5000, "expected_degree": 15, "directed": false, "self_loops": false },
+  "latent_space": { "dimension": 8, "base_measure": { "type": "gaussian_mixture", "params": { "K": 3, "weights": [0.34,0.33,0.33], "means": "random_sphere", "cov_scale": 0.5 } } },
+  "kernel": { "type": "heterophily_indefinite", "params": { "feature_map": "linear", "S_type": "diag_sign", "S_values": [1,1,1,-1,-1,-1,1,-1], "logit_bias": -2.2 } },
+  "degree_correction": { "enabled": false, "distribution": "lognormal", "params": { "mu": 0.0, "sigma": 0.0 } },
+  "attributes": { "node_features": { "enabled": false, "emission": "none", "params": {} }, "edge_features": { "enabled": false, "emission": "none", "params": {} } },
+  "observation": { "missing_edges": { "type": "MAR", "rate": 0.1 }, "ego_net_sampling": { "enabled": false, "k_nodes": null, "radius_hops": 2, "strategy": "seeded" }, "node_subsampling": { "enabled": false, "rate": 0.0 } },
+  "evaluation": { "holdout_edge_fraction": 0.2, "negative_sampling_ratio": 5 },
+  "temporal": { "enabled": false, "steps": 0, "deformation": { "bandwidth_scale_per_step": 1.0, "rotation_deg_per_step": 0.0, "density_temperature_per_step": 1.0 } }
+}

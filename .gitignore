@@ -1,6 +1,8 @@
 *.npy
 *.pth
+*.pt
 *.png
+*/__pycache__
 /__pycache__/
 /dataset
 /legacy
