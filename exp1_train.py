@@ -3,7 +3,7 @@
 import os
 import json
 import argparse
-from typing import Optional, Dict, List
+from typing import Optional, Dict, List, Tuple
 import numpy as np
 import torch
 
@@ -13,6 +13,7 @@ from models.utils import (
     build_sparse_adj,
     split_edges,
     negative_sampling,
+    auc_ap,  # <-- now used
 )
 
 # ------------------------
@@ -20,10 +21,6 @@ from models.utils import (
 # ------------------------
 
 def find_dataset_dir(root: str, rgm_type: str) -> str:
-    """
-    Find the first subdirectory of `root` whose name contains `rgm_type` (case-insensitive).
-    If `root` itself is a dataset directory (contains *_edges.txt), return root.
-    """
     root = os.path.abspath(root)
     if os.path.isdir(root) and any(f.endswith("_edges.txt") for f in os.listdir(root)):
         return root
@@ -45,10 +42,6 @@ def find_dataset_dir(root: str, rgm_type: str) -> str:
 
 
 def load_node_features(graph_dir: str, standardize: bool = True) -> np.ndarray:
-    """
-    Load node features from *_nodes.npz if 'node_features' exists; otherwise synthesize
-    from latent positions via a nonlinear random Fourier map (x = f(z)).
-    """
     node_npzs = [os.path.join(graph_dir, f) for f in os.listdir(graph_dir) if f.endswith("_nodes.npz")]
     if not node_npzs:
         raise FileNotFoundError(f"No *_nodes.npz found in {graph_dir}")
@@ -57,7 +50,6 @@ def load_node_features(graph_dir: str, standardize: bool = True) -> np.ndarray:
     if "node_features" in npz.files:
         feats = np.array(npz["node_features"], dtype=np.float32)
     else:
-        # Synthesize observable features from latent positions
         X = np.array(npz["positions"], dtype=np.float32)  # [N, d]
         N, d = X.shape
         rng = np.random.default_rng(7)
@@ -120,15 +112,56 @@ def step_elbo(
     return loss, stats
 
 
+def compute_auc_ap_for_split(
+    model: RG_VAE,
+    A_norm: torch.Tensor,
+    feats: torch.Tensor,
+    pos_edges: np.ndarray,
+    N: int,
+    undirected: bool,
+    exclude_pairs: Optional[set],
+    device: torch.device,
+    neg_ratio_for_auc: int = 1,
+) -> Tuple[float, float]:
+    """Compute AUC/AP on a set of positive edges against sampled negatives."""
+    model.eval()
+    with torch.no_grad():
+        # Build posterior mean embeddings
+        Z = model.embed(A_norm, feats=feats)  # [N, D]
+        # Prepare pairs
+        pos = torch.from_numpy(pos_edges).long().to(device)
+
+        # Negatives
+        neg_edges = negative_sampling(
+            N,
+            max(1, pos_edges.shape[0] * neg_ratio_for_auc),
+            exclude=exclude_pairs,
+            undirected=undirected,
+        )
+        neg = torch.from_numpy(neg_edges).long().to(device)
+
+        pairs = torch.cat([pos, neg], dim=0)
+        logits = model.pair_logits(Z, pairs)
+        scores = torch.sigmoid(logits).detach().cpu().numpy()
+
+        labels = np.concatenate([
+            np.ones(pos.shape[0], dtype=np.int32),
+            np.zeros(neg.shape[0], dtype=np.int32)
+        ])
+
+        return auc_ap(scores, labels)
+
+
 def parse_args():
     ap = argparse.ArgumentParser(description="Train RG-VAE (two-branch) on a SINGLE generated RGM dataset (Experiment 1)")
-    ap.add_argument("--data_root", required=True, help="Root folder containing all generated sets (e.g., D:/rebuttal2025/sim_data)")
+    ap.add_argument("--data_root", required=True, help="Root folder containing all generated sets")
     ap.add_argument("--rgm_type", required=True, help="Which dataset to train on (e.g., A1, A2, B1, B2, ...). Matches subfolder name.")
-    ap.add_argument("--models_dir", default="models/checkpoints", help="Where to save checkpoints (default ./models/checkpoints)")
+    ap.add_argument("--models_dir", default="models", help="Where to save checkpoints")
 
     # model/training
     ap.add_argument("--epochs", type=int, default=50)
     ap.add_argument("--lr", type=float, default=1e-3)
+    ap.add_argument("--rff_lr", type=float, default=2e-4, help="LR for RFF Omega/phases param group (if learn_omegas=True)")
     ap.add_argument("--weight_decay", type=float, default=1e-4)
     ap.add_argument("--latent_dim", type=int, default=16)
     ap.add_argument("--hidden", type=int, default=64)
@@ -170,10 +203,14 @@ def parse_args():
     ap.add_argument("--rff_unfreeze_epoch", type=int, default=-1,
                     help="If >0 and decoder=rff with learn_omegas=true, set requires_grad=True for Ω, phases after this epoch.")
 
+    # Validation AUC/AP sampling
+    ap.add_argument("--val_auc_neg_ratio", type=int, default=1,
+                    help="Number of negatives per positive for computing val AUC/AP (balanced default=1).")
+
     return ap.parse_args()
 
 
-def build_scheduler(optimizer: torch.optim.Optimizer, args):
+def maybe_build_scheduler(optimizer: torch.optim.Optimizer, args):
     if args.scheduler == "none":
         return None
     if args.scheduler == "plateau":
@@ -193,8 +230,44 @@ def current_lambda_kl(base_lambda_kl: float, epoch: int, warmup_epochs: int) -> 
         return base_lambda_kl
     if epoch >= warmup_epochs:
         return base_lambda_kl
-    # linear warm-up 0 -> base over [1..warmup_epochs]
     return base_lambda_kl * (epoch / float(warmup_epochs))
+
+
+def split_param_groups_for_rff(model: RG_VAE, base_lr: float, rff_lr: float):
+    """Create optimizer param groups, with a separate (possibly frozen) group for RFF Omega/phases."""
+    base_params = []
+    rff_params = []
+    dec = getattr(model, "decoder", None)
+    omega_tensors = []
+    if dec is not None and hasattr(dec, "Omega_eps") and hasattr(dec, "phases"):
+        omega_tensors = [dec.Omega_eps, dec.phases]
+
+    for p in model.parameters():
+        if any(p is t for t in omega_tensors):
+            rff_params.append(p)
+        else:
+            base_params.append(p)
+
+    param_groups = [{"params": base_params, "lr": base_lr}]
+    if len(rff_params) > 0:
+        param_groups.append({"params": rff_params, "lr": rff_lr})
+    return param_groups
+
+
+def set_rff_omegas_requires_grad(model: RG_VAE, flag: bool):
+    dec = getattr(model, "decoder", None)
+    if dec is None:
+        return
+    if hasattr(dec, "Omega_eps"):
+        try:
+            dec.Omega_eps.requires_grad = flag
+        except Exception:
+            pass
+    if hasattr(dec, "phases"):
+        try:
+            dec.phases.requires_grad = flag
+        except Exception:
+            pass
 
 
 def main():
@@ -251,38 +324,22 @@ def main():
         feat_dec_hidden=args.feat_dec_hidden,
     ).to(device)
 
-    print(f"Encoder Params: {sum(p.numel() for p in model.encoder.parameters())} \tDecoder Params: {sum(p.numel() for p in model.decoder.parameters())}")
+    # Optimizer with separate LR for RFF Ω/b
+    param_groups = split_param_groups_for_rff(model, base_lr=args.lr, rff_lr=args.rff_lr)
+    opt = torch.optim.Adam(param_groups, weight_decay=args.weight_decay)
+    sched = maybe_build_scheduler(opt, args)
 
-    opt = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
-    sched = build_scheduler(opt, args)
-
-    # If using RFF and we want to "freeze then unfreeze" omegas/phases:
-    def set_rff_omegas_requires_grad(flag: bool):
-        dec = getattr(model, "decoder", None)
-        if dec is None:
-            return
-        # Only works if learn_omegas=True in decoder_kwargs (then attributes are nn.Parameter)
-        if hasattr(dec, "Omega_eps"):
-            try:
-                dec.Omega_eps.requires_grad = flag
-            except Exception:
-                pass
-        if hasattr(dec, "phases"):
-            try:
-                dec.phases.requires_grad = flag
-            except Exception:
-                pass
-
-    # If learn_omegas=True and we intend to unfreeze later, start frozen
+    # Freeze then unfreeze Ω/phases if requested
     if args.decoder.lower() == "rff" and dec_kwargs.get("learn_omegas", False) and args.rff_unfreeze_epoch > 0:
-        set_rff_omegas_requires_grad(False)
+        set_rff_omegas_requires_grad(model, False)
 
     # Prepare exclude set for negatives
     exclude = set((int(a), int(b)) for a, b in edges)
 
-    # ------- Arrays to record losses per epoch -------
+    # ------- Arrays to record losses & metrics per epoch -------
     tr_total_hist, tr_edge_hist, tr_feat_hist, tr_kl_hist = [], [], [], []
     val_total_hist, val_edge_hist, val_feat_hist, val_kl_hist = [], [], [], []
+    val_auc_hist, val_ap_hist = [], []
 
     best_val = float("inf")
     best_state = None
@@ -292,7 +349,7 @@ def main():
     for epoch in range(1, args.epochs + 1):
         # Optional: unfreeze RFF omegas/phases at specified epoch
         if args.decoder.lower() == "rff" and args.rff_unfreeze_epoch > 0 and epoch == args.rff_unfreeze_epoch:
-            set_rff_omegas_requires_grad(True)
+            set_rff_omegas_requires_grad(model, True)
             print(f"[epoch {epoch}] Unfroze RFF Ω/phases for learning.")
 
         # KL warm-up
@@ -320,7 +377,7 @@ def main():
         tr_feat_hist.append(tr_feat)
         tr_kl_hist.append(tr_kl)
 
-        # ---- Validation
+        # ---- Validation (loss)
         model.eval()
         with torch.no_grad():
             val_loss, val_stats = step_elbo(
@@ -337,6 +394,14 @@ def main():
         val_edge_hist.append(va_edge)
         val_feat_hist.append(va_feat)
         val_kl_hist.append(va_kl)
+
+        # ---- Validation (AUC/AP)
+        va_auc, va_ap = compute_auc_ap_for_split(
+            model, A_norm, feats, val_edges, N, undirected, exclude, device,
+            neg_ratio_for_auc=max(1, args.val_auc_neg_ratio)
+        )
+        val_auc_hist.append(va_auc)
+        val_ap_hist.append(va_ap)
 
         # Scheduler step
         if sched is not None:
@@ -368,8 +433,8 @@ def main():
         print(
             f"Epoch {epoch:03d} | "
             f"train: total={tr_total:.4f}, edge={tr_edge:.4f}, feat={tr_feat:.4f}, KL={tr_kl:.4f}  ||  "
-            f"val: total={va_total:.4f}, edge={va_edge:.4f}, feat={va_feat:.4f}, KL={va_kl:.4f}  ||  "
-            f"λ_KL={lam_kl:.4g}"
+            f"val: total={va_total:.4f}, edge={va_edge:.4f}, feat={va_feat:.4f}, KL={va_kl:.4f}, "
+            f"AUC={va_auc:.4f}, AP={va_ap:.4f}  ||  λ_KL={lam_kl:.4g}"
         )
 
         if args.early_stop_patience > 0 and no_improve >= args.early_stop_patience:
@@ -378,7 +443,6 @@ def main():
 
     # Save checkpoint(s)
     ckpt_base = os.path.join(args.models_dir, f"rg_vae_{os.path.basename(ds_dir)}")
-    # Save last
     torch.save(
         {
             "state_dict": model.state_dict(),
@@ -396,12 +460,11 @@ def main():
     )
     print(f"Saved last model to {ckpt_base + '_last.pt'}")
 
-    # Save best (if recorded)
     if best_state is not None:
         torch.save(best_state, ckpt_base + "_best.pt")
         print(f"Saved best model (val total={best_val:.4f}) to {ckpt_base + '_best.pt'}")
 
-    # Save loss curves as NumPy arrays
+    # Save loss curves and metrics as NumPy arrays
     losses_path = ckpt_base + "_losses.npz"
     np.savez(
         losses_path,
@@ -413,6 +476,8 @@ def main():
         val_edge=np.array(val_edge_hist, dtype=np.float32),
         val_feat=np.array(val_feat_hist, dtype=np.float32),
         val_kl=np.array(val_kl_hist, dtype=np.float32),
+        val_auc=np.array(val_auc_hist, dtype=np.float32),
+        val_ap=np.array(val_ap_hist, dtype=np.float32),
     )
     print(f"Saved loss arrays to {losses_path}")
 
