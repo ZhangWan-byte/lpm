@@ -5,18 +5,31 @@ Train RG-VAE across many graphs of varying sizes under one SETTING (A1/A2/B1).
 - Re-uses models/rg_vae.RG_VAE.
 - Aggregates losses as per-graph averages each epoch.
 - Computes val AUC/AP each epoch (balanced negatives).
-- (Optional) GWD/LP-RMSE can be added later; kept concise on purpose.
+- Periodically computes IGNR-style GWD^2 (POT, non-entropic) and LP-RMSE.
+- Saves all metrics, checkpoints, and the full command line into results/<MMDD_HHMM>/
+
+Dependencies:
+  pip install POT
 """
 
 import os
-import argparse
+import sys
 import json
+import argparse
+from datetime import datetime
 from typing import List, Dict, Tuple, Optional
+
+# --- force line-buffered, auto-flushing prints (good for Slurm) ---
+try:
+    sys.stdout.reconfigure(line_buffering=True)
+    sys.stderr.reconfigure(line_buffering=True)
+except Exception:
+    os.environ.setdefault("PYTHONUNBUFFERED", "1")
+
 import numpy as np
 import torch
-import ot
+import ot  # Python Optimal Transport (POT)
 
-# Local imports
 from models.rg_vae import RG_VAE
 from models.utils import (
     load_graph_dir,
@@ -26,7 +39,7 @@ from models.utils import (
     auc_ap,
 )
 
-# ---------- IO helpers ----------
+# ----------------- Helpers: listing & features -----------------
 
 def list_graph_dirs(root: str) -> List[str]:
     subs = []
@@ -45,7 +58,7 @@ def load_node_features(graph_dir: str, standardize: bool = True) -> np.ndarray:
     if "node_features" in npz.files:
         feats = np.array(npz["node_features"], dtype=np.float32)
     else:
-        # fallback to latent-derived simple features
+        # fallback: synthesize from positions
         Z = np.array(npz["positions"], dtype=np.float32)
         N, d = Z.shape
         rng = np.random.default_rng(7)
@@ -59,8 +72,75 @@ def load_node_features(graph_dir: str, standardize: bool = True) -> np.ndarray:
         feats = (feats - mu) / sd
     return feats
 
+# ----------------- Training utils -----------------
 
-# ===== IGNR-style GWD & LP helpers (posterior samples vs ground-truth LPs) =====
+def current_lambda_kl(base_lambda_kl: float, epoch: int, warmup_epochs: int) -> float:
+    if warmup_epochs <= 0 or epoch >= warmup_epochs:
+        return base_lambda_kl
+    return base_lambda_kl * (epoch / float(warmup_epochs))
+
+def build_model(input_dim: int, args) -> RG_VAE:
+    try:
+        dec_kwargs = json.loads(args.decoder_kwargs)
+        if not isinstance(dec_kwargs, dict):
+            raise ValueError
+    except Exception:
+        raise SystemExit("--decoder_kwargs must be a JSON object string, e.g. '{\"num_features\":1024}'")
+    model = RG_VAE(
+        input_dim=input_dim,
+        latent_dim=args.latent_dim,
+        hidden=args.hidden,
+        enc_layers=2,
+        use_struct_feats=args.use_struct_feats,
+        decoder=args.decoder,
+        decoder_kwargs=dec_kwargs,
+        feat_dec_hidden=args.feat_dec_hidden,
+    )
+    return model
+
+def step_graph(model: RG_VAE,
+               A_norm: torch.Tensor,
+               feats_t: torch.Tensor,
+               pos_edges: np.ndarray,
+               neg_ratio: int,
+               undirected: bool,
+               exclude_pairs: Optional[set],
+               device: torch.device,
+               lambda_feat: float,
+               lambda_kl: float) -> Tuple[torch.Tensor, Dict[str, float]]:
+    n_pos = pos_edges.shape[0]
+    neg_edges = negative_sampling(
+        A_norm.size(0), max(1, n_pos * neg_ratio), exclude=exclude_pairs, undirected=undirected
+    )
+    pos = torch.from_numpy(pos_edges).long().to(device)
+    neg = torch.from_numpy(neg_edges).long().to(device)
+    loss, stats = model.elbo(A_norm, pos, neg, feats=feats_t, lambda_feat=lambda_feat, lambda_kl=lambda_kl)
+    return loss, stats
+
+def val_metrics(model: RG_VAE,
+                A_norm: torch.Tensor,
+                feats_t: torch.Tensor,
+                val_edges: np.ndarray,
+                undirected: bool,
+                exclude_pairs: Optional[set],
+                device: torch.device,
+                neg_ratio_for_auc: int = 1) -> Tuple[float, float]:
+    model.eval()
+    with torch.no_grad():
+        Z = model.embed(A_norm, feats=feats_t)  # [N, D]
+        pos = torch.from_numpy(val_edges).long().to(device)
+        neg_edges = negative_sampling(
+            A_norm.size(0), max(1, val_edges.shape[0] * neg_ratio_for_auc), exclude=exclude_pairs, undirected=undirected
+        )
+        neg = torch.from_numpy(neg_edges).long().to(device)
+        pairs = torch.cat([pos, neg], dim=0)
+        logits = model.pair_logits(Z, pairs)
+        scores = torch.sigmoid(logits).detach().cpu().numpy()
+        labels = np.concatenate([np.ones(pos.size(0), dtype=np.int32), np.zeros(neg.size(0), dtype=np.int32)])
+        auc, ap = auc_ap(scores, labels)
+        return auc, ap
+
+# ----------------- IGNR-style GWD & LP-RMSE (POT, non-entropic) -----------------
 
 def _subsample_indices(N: int, max_nodes: int, seed: int = 0) -> np.ndarray:
     if max_nodes <= 0 or max_nodes >= N:
@@ -149,89 +229,13 @@ def procrustes_rmse(Z_true: np.ndarray, Z_hat: np.ndarray, center: bool = True, 
     R = U @ Vt
     aligned = Y @ R
     return float(np.sqrt(np.mean((aligned - X) ** 2)))
-# ===== end IGNR-style helpers =====
 
-
-# ---------- Training utils ----------
-
-def current_lambda_kl(base_lambda_kl: float, epoch: int, warmup_epochs: int) -> float:
-    if warmup_epochs <= 0 or epoch >= warmup_epochs:
-        return base_lambda_kl
-    return base_lambda_kl * (epoch / float(warmup_epochs))
-
-
-def build_model(input_dim: int, args) -> RG_VAE:
-    # decoder kwargs
-    try:
-        dec_kwargs = json.loads(args.decoder_kwargs)
-        if not isinstance(dec_kwargs, dict):
-            raise ValueError
-    except Exception:
-        raise SystemExit("--decoder_kwargs must be a JSON object string, e.g. '{\"num_features\":512}'")
-
-    model = RG_VAE(
-        input_dim=input_dim,
-        latent_dim=args.latent_dim,
-        hidden=args.hidden,
-        enc_layers=2,
-        use_struct_feats=args.use_struct_feats,
-        decoder=args.decoder,
-        decoder_kwargs=dec_kwargs,
-        feat_dec_hidden=args.feat_dec_hidden,
-    )
-    return model
-
-
-def step_graph(model: RG_VAE,
-               A_norm: torch.Tensor,
-               feats_t: torch.Tensor,
-               train_edges: np.ndarray,
-               neg_ratio: int,
-               undirected: bool,
-               exclude_pairs: Optional[set],
-               device: torch.device,
-               lambda_feat: float,
-               lambda_kl: float) -> Tuple[torch.Tensor, Dict[str, float]]:
-    n_pos = train_edges.shape[0]
-    neg_edges = negative_sampling(
-        A_norm.size(0), n_pos * neg_ratio, exclude=exclude_pairs, undirected=undirected
-    )
-    pos = torch.from_numpy(train_edges).long().to(device)
-    neg = torch.from_numpy(neg_edges).long().to(device)
-    loss, stats = model.elbo(A_norm, pos, neg, feats=feats_t, lambda_feat=lambda_feat, lambda_kl=lambda_kl)
-    return loss, stats
-
-
-def val_metrics(model: RG_VAE,
-                A_norm: torch.Tensor,
-                feats_t: torch.Tensor,
-                val_edges: np.ndarray,
-                undirected: bool,
-                exclude_pairs: Optional[set],
-                device: torch.device,
-                neg_ratio_for_auc: int = 1) -> Tuple[float, float]:
-    model.eval()
-    with torch.no_grad():
-        Z = model.embed(A_norm, feats=feats_t)  # [N, D]
-        pos = torch.from_numpy(val_edges).long().to(device)
-        neg_edges = negative_sampling(
-            A_norm.size(0), max(1, val_edges.shape[0] * neg_ratio_for_auc), exclude=exclude_pairs, undirected=undirected
-        )
-        neg = torch.from_numpy(neg_edges).long().to(device)
-        pairs = torch.cat([pos, neg], dim=0)
-        logits = model.pair_logits(Z, pairs)
-        scores = torch.sigmoid(logits).detach().cpu().numpy()
-        labels = np.concatenate([np.ones(pos.size(0), dtype=np.int32), np.zeros(neg.size(0), dtype=np.int32)])
-        auc, ap = auc_ap(scores, labels)
-        return auc, ap
-
-
-# ---------- Main ----------
+# ----------------- CLI -----------------
 
 def parse_args():
     ap = argparse.ArgumentParser(description="Train RG-VAE on a batch of graphs (A1/A2/B1).")
     ap.add_argument("--setting_dir", required=True, help="Folder like sim_data_batch/A1 (contains many graphs)")
-    ap.add_argument("--models_dir", default="models/checkpoints")
+    ap.add_argument("--results_dir", default="results/")
 
     # model & training
     ap.add_argument("--epochs", type=int, default=80)
@@ -259,7 +263,10 @@ def parse_args():
     # val metrics
     ap.add_argument("--val_auc_neg_ratio", type=int, default=1)
 
-    # --- IGNR-style GWD & LP-RMSE evaluation ---
+    # per-graph pair budget (optional downsampling of pos edges per graph for speed)
+    ap.add_argument("--max_pos_per_graph", type=int, default=0, help="0 = use all train positives; otherwise cap per graph per epoch")
+
+    # IGNR-style GWD & LP-RMSE evaluation cadence
     ap.add_argument("--gwd_every", type=int, default=10, help="Every N epochs compute IGNR-style POT GWD (0=off)")
     ap.add_argument("--gwd_nodes", type=int, default=2000, help="Max nodes per graph for GWD (subsample)")
     ap.add_argument("--gwd_samples", type=int, default=5, help="# posterior samples to average GWD over")
@@ -268,16 +275,26 @@ def parse_args():
     ap.add_argument("--lp_every", type=int, default=10, help="Every N epochs compute LP-RMSE (0=off)")
     ap.add_argument("--lp_nodes", type=int, default=5000, help="Max nodes per graph for LP-RMSE (subsample)")
 
-
-    # per-graph pair budget (optional downsampling of pos edges per graph for speed)
-    ap.add_argument("--max_pos_per_graph", type=int, default=0, help="0 = use all train positives; otherwise cap per graph per epoch")
-
     return ap.parse_args()
 
+# ----------------- Main -----------------
 
 def main():
     args = parse_args()
-    os.makedirs(args.models_dir, exist_ok=True)
+
+    # Create results directory with timestamp
+    stamp = datetime.now().strftime("%m%d_%H%M")
+    results_root = os.path.join(args.results_dir, stamp)
+    os.makedirs(results_root, exist_ok=True)
+
+    # Save full command line
+    with open(os.path.join(results_root, "command.txt"), "w") as f:
+        f.write(" ".join(sys.argv) + "\n")
+
+    # Save args for reproducibility
+    with open(os.path.join(results_root, "args.json"), "w") as f:
+        json.dump(vars(args), f, indent=2)
+
     device = torch.device(args.device)
 
     graph_dirs = list_graph_dirs(args.setting_dir)
@@ -291,12 +308,11 @@ def main():
     model = build_model(input_dim, args).to(device)
     opt = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
 
-    # Preload splits and adjacency/feats into memory (fits easily on 100+GB RAM)
+    # Preload splits and adjacency/feats into memory
     loaded = []
     for gdir in graph_dirs:
         edges, N, directed, base = load_graph_dir(gdir)
         undirected = not directed
-        # splits (persist at graph folder so single-graph tools can reuse later)
         split_path = os.path.join(gdir, f"{base}_splits_seed{args.split_seed}.npz")
         if os.path.exists(split_path):
             data = np.load(split_path)
@@ -305,7 +321,6 @@ def main():
             splits = split_edges(edges, val_frac=args.val_frac, test_frac=args.test_frac, seed=args.split_seed, undirected=undirected)
             tr, va, te = splits["train"], splits["val"], splits["test"]
             np.savez(split_path, train=tr, val=va, test=te)
-        # cap training positives per-graph if requested
         if args.max_pos_per_graph and tr.shape[0] > args.max_pos_per_graph:
             idx = np.random.default_rng(123).choice(tr.shape[0], size=args.max_pos_per_graph, replace=False)
             tr = tr[idx]
@@ -314,9 +329,18 @@ def main():
         exclude = set((int(a), int(b)) for a, b in edges)
         loaded.append((gdir, base, N, undirected, A_norm, feats, tr, va, exclude))
 
-    print(f"Loaded {len(loaded)} graphs from {args.setting_dir}. Starting training...")
+    print(f"Loaded {len(loaded)} graphs from {args.setting_dir}. Results → {results_root}", flush=True)
 
-    # Training
+    # Metric storage (per-epoch)
+    tr_total_hist, tr_edge_hist, tr_feat_hist, tr_kl_hist = [], [], [], []
+    va_total_hist, va_edge_hist, va_feat_hist, va_kl_hist = [], [], [], []
+    va_auc_hist, va_ap_hist = [], []
+    gwd_hist, lprmse_hist = [], []
+
+    best_val_total = float("inf")
+    best_epoch = -1
+    best_ckpt = None
+
     for epoch in range(1, args.epochs + 1):
         lam_kl = current_lambda_kl(args.lambda_kl, epoch, args.kl_warmup_epochs)
 
@@ -337,14 +361,13 @@ def main():
             tr_feats  += stats["recon_feat"]
             tr_kls    += stats["kl"]
 
-        # Validation (loss via same step on val edges, plus AUC/AP)
+        # Validation (loss-like eval + AUC/AP)
         model.eval()
         va_totals = va_edges = va_feats = va_kls = 0.0
         va_aucs: List[float] = []
         va_aps:  List[float] = []
         with torch.no_grad():
             for (_, _, _, undirected, A_norm, feats_t, _, va, exclude) in loaded:
-                # loss-like evaluation on val edges
                 loss, stats = step_graph(
                     model, A_norm, feats_t, va, args.neg_ratio, undirected, exclude, device,
                     lambda_feat=args.lambda_feat, lambda_kl=lam_kl
@@ -353,21 +376,33 @@ def main():
                 va_edges  += stats["recon_edge"]
                 va_feats  += stats["recon_feat"]
                 va_kls    += stats["kl"]
-                # AUC/AP
+
                 auc, ap = val_metrics(
                     model, A_norm, feats_t, va, undirected, exclude, device, neg_ratio_for_auc=args.val_auc_neg_ratio
                 )
                 va_aucs.append(auc); va_aps.append(ap)
 
         nG = float(len(loaded))
-        print(
-            f"Epoch {epoch:03d} | "
-            f"train: total={tr_totals/nG:.4f}, edge={tr_edges/nG:.4f}, feat={tr_feats/nG:.4f}, KL={tr_kls/nG:.4f}  ||  "
-            f"val: total={va_totals/nG:.4f}, edge={va_edges/nG:.4f}, feat={va_feats/nG:.4f}, KL={va_kls/nG:.4f}, "
-            f"AUC={np.nanmean(va_aucs):.4f}, AP={np.nanmean(va_aps):.4f}  ||  λ_KL={lam_kl:.4g}"
-        )
+        tr_total = tr_totals / nG
+        tr_edge  = tr_edges  / nG
+        tr_feat  = tr_feats  / nG
+        tr_kl    = tr_kls    / nG
+        va_total = va_totals / nG
+        va_edge  = va_edges  / nG
+        va_feat  = va_feats  / nG
+        va_kl    = va_kls    / nG
+        va_auc   = float(np.nanmean(va_aucs)) if len(va_aucs) else np.nan
+        va_ap    = float(np.nanmean(va_aps))  if len(va_aps)  else np.nan
 
-        # ---- Periodic IGNR-style GWD and LP-RMSE on validation graphs ----
+        # Append to histories
+        tr_total_hist.append(tr_total); tr_edge_hist.append(tr_edge); tr_feat_hist.append(tr_feat); tr_kl_hist.append(tr_kl)
+        va_total_hist.append(va_total); va_edge_hist.append(va_edge); va_feat_hist.append(va_feat); va_kl_hist.append(va_kl)
+        va_auc_hist.append(va_auc); va_ap_hist.append(va_ap)
+
+        # Periodic IGNR-style GWD & LP-RMSE on validation graphs
+        gwd_mean = np.nan
+        lprmse_mean = np.nan
+
         if args.gwd_every > 0 and (epoch % args.gwd_every == 0):
             gwd_vals = []
             picked = 0
@@ -388,7 +423,8 @@ def main():
                 if picked >= args.gwd_max_graphs:
                     break
             if gwd_vals:
-                print(f"    [Epoch {epoch:03d}] IGNR GWD^2 (mean over {len(gwd_vals)} val graphs): {np.mean(gwd_vals):.6f}")
+                gwd_mean = float(np.mean(gwd_vals))
+        gwd_hist.append(gwd_mean)
 
         if args.lp_every > 0 and (epoch % args.lp_every == 0):
             lp_vals = []
@@ -399,9 +435,7 @@ def main():
                 Z_true = load_true_positions(gdir)
                 if Z_true is None:
                     continue
-                # One posterior sample for LP-RMSE (or average a few if desired)
                 Z_hat = _posterior_sample_latents(model, A_norm, feats_t, seed=epoch)
-                # Subsample for speed if needed
                 idx = _subsample_indices(Z_true.shape[0], args.lp_nodes, seed=epoch)
                 rmse = procrustes_rmse(Z_true[idx], Z_hat[idx], center=True, scale=False)
                 lp_vals.append(rmse)
@@ -409,29 +443,82 @@ def main():
                 if picked >= args.gwd_max_graphs:
                     break
             if lp_vals:
-                print(f"    [Epoch {epoch:03d}] LP-RMSE (mean over {len(lp_vals)} val graphs): {np.mean(lp_vals):.6f}")
+                lprmse_mean = float(np.mean(lp_vals))
+        lprmse_hist.append(lprmse_mean)
 
+        print(
+            f"Epoch {epoch:03d} | "
+            f"train: total={tr_total:.4f}, edge={tr_edge:.4f}, feat={tr_feat:.4f}, KL={tr_kl:.4f}  ||  "
+            f"val: total={va_total:.4f}, edge={va_edge:.4f}, feat={va_feat:.4f}, KL={va_kl:.4f}, "
+            f"AUC={va_auc:.4f}, AP={va_ap:.4f}  ||  λ_KL={lam_kl:.4g}"
+            + (f"  ||  GWD^2={gwd_mean:.6f}" if not np.isnan(gwd_mean) else "")
+            + (f"  ||  LP-RMSE={lprmse_mean:.6f}" if not np.isnan(lprmse_mean) else ""),
+            flush=True
+        )
 
-    # Save final checkpoint
-    setting_name = os.path.basename(os.path.normpath(args.setting_dir))
-    ckpt_path = os.path.join(args.models_dir, f"rg_vae_{setting_name}_batch_last.pt")
-    torch.save(
-        {
-            "state_dict": model.state_dict(),
-            "latent_dim": args.latent_dim,
-            "hidden": args.hidden,
-            "input_dim": input_dim,
-            "decoder": args.decoder,
-            "decoder_kwargs": json.loads(args.decoder_kwargs),
-            "use_struct_feats": args.use_struct_feats,
-            "feat_dec_hidden": args.feat_dec_hidden,
-            "lambda_feat": args.lambda_feat,
-            "lambda_kl": args.lambda_kl,
-        },
-        ckpt_path,
-    )
-    print(f"Saved model to {ckpt_path}")
+        # Save metrics so far (append-safe)
+        np.savez(
+            os.path.join(results_root, "metrics.npz"),
+            tr_total=np.array(tr_total_hist, dtype=np.float32),
+            tr_edge=np.array(tr_edge_hist, dtype=np.float32),
+            tr_feat=np.array(tr_feat_hist, dtype=np.float32),
+            tr_kl=np.array(tr_kl_hist, dtype=np.float32),
+            va_total=np.array(va_total_hist, dtype=np.float32),
+            va_edge=np.array(va_edge_hist, dtype=np.float32),
+            va_feat=np.array(va_feat_hist, dtype=np.float32),
+            va_kl=np.array(va_kl_hist, dtype=np.float32),
+            va_auc=np.array(va_auc_hist, dtype=np.float32),
+            va_ap=np.array(va_ap_hist, dtype=np.float32),
+            gwd2=np.array(gwd_hist, dtype=np.float64),
+            lp_rmse=np.array(lprmse_hist, dtype=np.float64),
+            epochs=np.arange(1, len(tr_total_hist) + 1, dtype=np.int32),
+            setting_dir=args.setting_dir,
+        )
 
+        # Track & save best by val total
+        if va_total < best_val_total:
+            best_val_total = va_total
+            best_epoch = epoch
+            ckpt = {
+                "state_dict": model.state_dict(),
+                "latent_dim": args.latent_dim,
+                "hidden": args.hidden,
+                "input_dim": input_dim,
+                "decoder": args.decoder,
+                "decoder_kwargs": json.loads(args.decoder_kwargs),
+                "use_struct_feats": args.use_struct_feats,
+                "feat_dec_hidden": args.feat_dec_hidden,
+                "lambda_feat": args.lambda_feat,
+                "lambda_kl": args.lambda_kl,
+                "epoch": epoch,
+                "best_val_total": best_val_total,
+            }
+            # Save to results/<stamp>/best.pt
+            best_path_results = os.path.join(results_root, f"rg_vae_{os.path.basename(os.path.normpath(args.setting_dir))}_best.pt")
+            torch.save(ckpt, best_path_results)
+            print(f"Saved BEST model (val total={best_val_total:.4f}) to {best_path_results}", flush=True)
+
+    # Save last checkpoint
+    last_ckpt = {
+        "state_dict": model.state_dict(),
+        "latent_dim": args.latent_dim,
+        "hidden": args.hidden,
+        "input_dim": input_dim,
+        "decoder": args.decoder,
+        "decoder_kwargs": json.loads(args.decoder_kwargs),
+        "use_struct_feats": args.use_struct_feats,
+        "feat_dec_hidden": args.feat_dec_hidden,
+        "lambda_feat": args.lambda_feat,
+        "lambda_kl": args.lambda_kl,
+        "epoch": args.epochs,
+        "best_val_total": best_val_total,
+        "best_epoch": best_epoch,
+    }
+    last_path_results = os.path.join(results_root, f"rg_vae_{os.path.basename(os.path.normpath(args.setting_dir))}_last.pt")
+    torch.save(last_ckpt, last_path_results)
+
+    print(f"Saved LAST model to {last_path_results}", flush=True)
+    print(f"All metrics saved to {os.path.join(results_root, 'metrics.npz')}", flush=True)
 
 if __name__ == "__main__":
     main()

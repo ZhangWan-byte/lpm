@@ -5,6 +5,7 @@
 */__pycache__
 /__pycache__/
 /models/checkpoints
+/results
 /sim_data_batch
 /sim_data
 /dataset
