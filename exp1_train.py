@@ -215,12 +215,14 @@ def main():
     # Prepare exclude set for negatives
     exclude = set((int(a), int(b)) for a, b in edges)
 
+    # ------- Arrays to record losses per epoch -------
+    tr_total_hist, tr_edge_hist, tr_feat_hist, tr_kl_hist = [], [], [], []
+    val_total_hist, val_edge_hist, val_feat_hist, val_kl_hist = [], [], [], []
+
     # Training loop (single dataset)
     for epoch in range(1, args.epochs + 1):
         # ---- Train
         model.train()
-        tr_loss, tr_recon_edge, tr_recon_feat, tr_kl = 0.0, 0.0, 0.0, 0.0
-
         loss, stats = step_elbo(
             model, A_norm, train_edges, args.neg_ratio, N, undirected, exclude, device, feats,
             lambda_feat=args.lambda_feat, lambda_kl=args.lambda_kl
@@ -229,10 +231,15 @@ def main():
         loss.backward()
         opt.step()
 
-        tr_loss += float(loss.item())
-        tr_recon_edge += stats["recon_edge"]
-        tr_recon_feat += stats["recon_feat"]
-        tr_kl += stats["kl"]
+        tr_total = float(loss.item())
+        tr_edge = stats["recon_edge"]
+        tr_feat = stats["recon_feat"]
+        tr_kl = stats["kl"]
+
+        tr_total_hist.append(tr_total)
+        tr_edge_hist.append(tr_edge)
+        tr_feat_hist.append(tr_feat)
+        tr_kl_hist.append(tr_kl)
 
         # ---- Validation
         model.eval()
@@ -242,10 +249,20 @@ def main():
                 lambda_feat=args.lambda_feat, lambda_kl=args.lambda_kl
             )
 
+        va_total = float(val_loss.item())
+        va_edge = val_stats["recon_edge"]
+        va_feat = val_stats["recon_feat"]
+        va_kl = val_stats["kl"]
+
+        val_total_hist.append(va_total)
+        val_edge_hist.append(va_edge)
+        val_feat_hist.append(va_feat)
+        val_kl_hist.append(va_kl)
+
         print(
             f"Epoch {epoch:03d} | "
-            f"train: total={tr_loss:.4f}, edge={tr_recon_edge:.4f}, feat={tr_recon_feat:.4f}, KL={tr_kl:.4f}  ||  "
-            f"val: total={float(val_loss.item()):.4f}, edge={val_stats['recon_edge']:.4f}, feat={val_stats['recon_feat']:.4f}, KL={val_stats['kl']:.4f}"
+            f"train: total={tr_total:.4f}, edge={tr_edge:.4f}, feat={tr_feat:.4f}, KL={tr_kl:.4f}  ||  "
+            f"val: total={va_total:.4f}, edge={va_edge:.4f}, feat={va_feat:.4f}, KL={va_kl:.4f}"
         )
 
     # Save checkpoint for this dataset
@@ -266,6 +283,21 @@ def main():
         ckpt_path,
     )
     print(f"Saved model to {ckpt_path}")
+
+    # Save loss curves as NumPy arrays
+    losses_path = os.path.join(args.models_dir, f"loss_curves_{os.path.basename(ds_dir)}.npz")
+    np.savez(
+        losses_path,
+        train_total=np.array(tr_total_hist, dtype=np.float32),
+        train_edge=np.array(tr_edge_hist, dtype=np.float32),
+        train_feat=np.array(tr_feat_hist, dtype=np.float32),
+        train_kl=np.array(tr_kl_hist, dtype=np.float32),
+        val_total=np.array(val_total_hist, dtype=np.float32),
+        val_edge=np.array(val_edge_hist, dtype=np.float32),
+        val_feat=np.array(val_feat_hist, dtype=np.float32),
+        val_kl=np.array(val_kl_hist, dtype=np.float32),
+    )
+    print(f"Saved loss arrays to {losses_path}")
 
 
 if __name__ == "__main__":
