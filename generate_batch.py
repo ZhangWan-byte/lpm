@@ -27,89 +27,6 @@ from rgm_sims.generator import generate_graph
 from rgm_sims.io import save_graph, ensure_dir
 
 
-def make_cfg_A1(name: str, N: int, seed: int) -> Dict[str, Any]:
-    """SBM-like, 4 blocks."""
-    return {
-        "name": name,
-        "seed": int(seed),
-        "graph": {"N": int(N), "expected_degree": 20, "directed": False, "self_loops": False},
-        "latent_space": {
-            "dimension": 2,
-            "base_measure": {"type": "categorical_blocks", "params": {"K": 4, "pi": [0.25, 0.25, 0.25, 0.25]}},
-        },
-        "kernel": {
-            "type": "block_constant",
-            "params": {
-                "B": [
-                    [0.06, 0.01, 0.01, 0.01],
-                    [0.01, 0.06, 0.01, 0.01],
-                    [0.01, 0.01, 0.06, 0.01],
-                    [0.01, 0.01, 0.01, 0.06],
-                ]
-            },
-        },
-        "degree_correction": {"enabled": False, "distribution": "lognormal", "params": {"mu": 0.0, "sigma": 0.0}},
-        "attributes": {"node_features": {"enabled": False, "emission": "none", "params": {}}, "edge_features": {"enabled": False, "emission": "none", "params": {}}},
-        "observation": {"missing_edges": {"type": "MAR", "rate": 0.10}},
-        "evaluation": {"holdout_edge_fraction": 0.10, "negative_sampling_ratio": 5},
-        "temporal": {"enabled": False, "steps": 0, "deformation": {"bandwidth_scale_per_step": 1.0}},
-    }
-
-
-def make_cfg_A2(name: str, N: int, seed: int) -> Dict[str, Any]:
-    """Radial-smooth kernel, Gaussian latent."""
-    return {
-        "name": name,
-        "seed": int(seed),
-        "graph": {"N": int(N), "expected_degree": 12, "directed": False, "self_loops": False},
-        "latent_space": {
-            "dimension": 2,
-            "base_measure": {"type": "isotropic_gaussian", "params": {"mean": [0.0, 0.0], "sigma": 1.0}},
-        },
-        "kernel": {
-            "type": "radial_smooth",
-            "params": {
-                "range": 3.0,
-                # high → low on increasing distance
-                "values": [0.55, 0.15, 0.03, 0.005],
-            },
-        },
-        "degree_correction": {"enabled": False, "distribution": "lognormal", "params": {"mu": 0.0, "sigma": 0.0}},
-        "attributes": {"node_features": {"enabled": False, "emission": "none", "params": {}}, "edge_features": {"enabled": False, "emission": "none", "params": {}}},
-        "observation": {"missing_edges": {"type": "MAR", "rate": 0.10}},
-        "evaluation": {"holdout_edge_fraction": 0.10, "negative_sampling_ratio": 10},
-        "temporal": {"enabled": False, "steps": 0, "deformation": {"bandwidth_scale_per_step": 1.0}},
-    }
-
-
-def make_cfg_B1(name: str, N: int, seed: int) -> Dict[str, Any]:
-    """
-    Stationary/translation-invariant-esque.
-    We approximate with radial_smooth here for simplicity & speed (decoder can still be RFF).
-    """
-    return {
-        "name": name,
-        "seed": int(seed),
-        "graph": {"N": int(N), "expected_degree": 15, "directed": False, "self_loops": False},
-        "latent_space": {
-            "dimension": 2,
-            "base_measure": {"type": "isotropic_gaussian", "params": {"mean": [0.0, 0.0], "sigma": 1.0}},
-        },
-        "kernel": {
-            "type": "radial_smooth",
-            "params": {
-                "range": 3.0,
-                "values": [0.6, 0.20, 0.04, 0.01],
-            },
-        },
-        "degree_correction": {"enabled": False, "distribution": "lognormal", "params": {"mu": 0.0, "sigma": 0.0}},
-        "attributes": {"node_features": {"enabled": False, "emission": "none", "params": {}}, "edge_features": {"enabled": False, "emission": "none", "params": {}}},
-        "observation": {"missing_edges": {"type": "MAR", "rate": 0.10}},
-        "evaluation": {"holdout_edge_fraction": 0.10, "negative_sampling_ratio": 10},
-        "temporal": {"enabled": False, "steps": 0, "deformation": {"bandwidth_scale_per_step": 1.0}},
-    }
-
-
 def synthesize_node_features(out_npz_path: str, x_dim: int = 16, seed: int = 7):
     """
     Append a simple feature matrix x = [z, z^2, sin(Wz), cos(Wz)] to *_nodes.npz.
@@ -153,7 +70,10 @@ def main():
     rng = np.random.default_rng(args.seed)
     ensure_dir(setting_dir)
 
-    cfg_fn = {"A1": make_cfg_A1, "A2": make_cfg_A2, "B1": make_cfg_B1}[args.setting]
+    cfg_dict = {"A1": json.load(open(os.path.join(REPO_ROOT, "configs", "A1.json"))), \
+                "A2": json.load(open(os.path.join(REPO_ROOT, "configs", "A2.json"))), \
+                "B1": json.load(open(os.path.join(REPO_ROOT, "configs", "B1.json")))
+            }[args.setting]
 
     total = 0
     for split_name, k in splits:
@@ -164,7 +84,9 @@ def main():
                 outdir = os.path.join(setting_dir, run_name)
                 ensure_dir(outdir)
 
-                cfg_dict = cfg_fn(run_name, N, seed)
+                cfg_dict["name"] = run_name
+                cfg_dict["seed"] = seed
+                cfg_dict["graph"]["N"] = N
                 cfg = SimConfig(**cfg_dict)
                 res = generate_graph(cfg)
 
@@ -174,12 +96,13 @@ def main():
                 if res.get("positions_out") is not None:
                     extra["positions_out"] = res["positions_out"]
                     extra["positions_in"] = res["positions_in"]
-
+                if res.get("node_features") is not None:
+                        extra["node_features"] = res["node_features"]   # <-- add this
                 save_graph(outdir, cfg.name, cfg.graph.N, res["edges"], cfg.graph.directed, res["positions"], extra)
 
                 # add synthetic node features to *_nodes.npz
-                nodes_npz = os.path.join(outdir, f"{cfg.name}_nodes.npz")
-                synthesize_node_features(nodes_npz, x_dim=args.x_dim, seed=seed)
+                # nodes_npz = os.path.join(outdir, f"{cfg.name}_nodes.npz")
+                # synthesize_node_features(nodes_npz, x_dim=args.x_dim, seed=seed)
 
                 total += 1
                 print(f"[{args.setting}] saved {run_name} → {outdir}")

@@ -1,53 +1,45 @@
 {
-  "name": "B1_TranslationInvariant_RBF_ARD",
-  "seed": 130,
-  "graph": { "N": 10000, "expected_degree": 12, "directed": false, "self_loops": false },
+  "name": "B1_TIRFF_Mixture_Anisotropic",
+  "seed": 128,
+  "graph": { "N": 10000, "expected_degree": 2, "directed": false, "self_loops": false },
+
   "latent_space": {
-    "dimension": 4,
-    "base_measure": {
-      "type": "isotropic_gaussian",
-      "params": { "mean": [0.0, 0.0, 0.0, 0.0], "sigma": 1.0 }
-    }
+    "dimension": 2,
+    "base_measure": { "type": "isotropic_gaussian", "params": { "mean": [0.0, 0.0], "sigma": 1.0 } }
   },
+
   "kernel": {
-    "type": "translation_invariant",
+    "type": "translation_invariant_rff_mixture",
     "params": {
-      "family": "rbf",
+      "components": [
+        {"weight": 0.55, "family": "rbf",    "lengthscales": [0.8, 1.6], "num_features": 384, "seed": 11},
+        {"weight": 0.30, "family": "matern", "lengthscales": [0.5, 1.2], "num_features": 384, "seed": 12},
+        {"weight": 0.15, "family": "laplace","lengthscales": [1.8, 0.7], "num_features": 256, "seed": 13}
+      ],
       "amplitude": 1.0,
-      "lengthscales": [1.2, 0.9, 1.0, 1.6],
-      "logit_bias": -2.6
+      "logit_bias": -2.3
     }
   },
-  "degree_correction": {
-    "enabled": false,
-    "distribution": "lognormal",
-    "params": { "mu": 0.0, "sigma": 0.0 }
-  },
+
+  "degree_correction": { "enabled": false, "distribution": "lognormal", "params": { "mu": 0.0, "sigma": 0.0 } },
+
   "attributes": {
     "node_features": {
       "enabled": true,
       "emission": "gaussian",
       "params": {
-        "map": "nonlinear_random_fourier",
-        "num_features": 16,
-        "noise_sigma": 0.1
+        "x_dim": 40,
+        "poly": true,
+        "rff_features": 256,
+        "rff_lengthscale": 1.2,
+        "include_blocks_onehot": false,
+        "standardize": true
       }
     },
     "edge_features": { "enabled": false, "emission": "none", "params": {} }
   },
-  "observation": {
-    "missing_edges": { "type": "MAR", "rate": 0.1 },
-    "ego_net_sampling": { "enabled": false, "k_nodes": null, "radius_hops": 2, "strategy": "seeded" },
-    "node_subsampling": { "enabled": false, "rate": 0.0 }
-  },
-  "evaluation": { "holdout_edge_fraction": 0.2, "negative_sampling_ratio": 5 },
-  "temporal": {
-    "enabled": false,
-    "steps": 0,
-    "deformation": {
-      "bandwidth_scale_per_step": 1.0,
-      "rotation_deg_per_step": 0.0,
-      "density_temperature_per_step": 1.0
-    }
-  }
+
+  "observation": { "missing_edges": { "type": "MAR", "rate": 0.10 } },
+  "evaluation": { "holdout_edge_fraction": 0.20, "negative_sampling_ratio": 5 },
+  "temporal": { "enabled": false, "steps": 0, "deformation": { "bandwidth_scale_per_step": 1.0 } }
 }

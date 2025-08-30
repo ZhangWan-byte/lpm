@@ -54,57 +54,48 @@ def kernel_indefinite_linear(X, S_vals, logit_bias):
     return G + float(logit_bias)
 
 
-# ---------------------------
-# NEW: Translation-invariant kernels via Random Fourier Features (RFF)
-# ---------------------------
+# ====== RFF utilities and TI-mixture kernel (append to kernels.py) ======
+from typing import Dict, Any, Optional, List
+import numpy as np
 
 def _rff_omegas_and_phases(
     d: int,
     m: int,
-    lengthscales: np.ndarray,
+    lengthscales,
     family: str = "rbf",
     seed: Optional[int] = None,
 ):
     """
-    Draw spectral frequencies Ω and phases b for RFF.
-    For 'rbf', ω ~ N(0, Λ) with Λ = diag(ell^{-2}).
-    For other families, we fall back to Gaussian draws (reasonable default).
+    Draw spectral frequencies Ω and phases b for Random Fourier Features.
+    For stationary kernels k(h), Bochner's theorem => ω sampled from spectral density.
+    - family='rbf': ω ~ N(0, diag(ell^{-2}))  (ARD allowed)
+    - family='laplace'|'exponential': ω ~ Cauchy(0, ell^{-1}) independently (approx.)
+    - family='matern': simple lognormal scale mixture proxy around Gaussian
     Returns:
         Omega: [m, d], phases: [m]
     """
     rng = np.random.default_rng(None if seed is None else int(seed))
-    family = (family or "rbf").lower()
 
-    # ARD: lengthscales per dimension; allow scalar ell
-    if np.isscalar(lengthscales):
-        ell = np.full((d,), float(lengthscales))
-    else:
-        ell = np.array(lengthscales, dtype=float).reshape(-1)
-        if ell.size != d:
-            raise ValueError(f"lengthscales must have size {d}, got {ell.size}")
-
+    ell = np.array(lengthscales, dtype=float).reshape(-1) if np.ndim(lengthscales) > 0 else np.full((d,), float(lengthscales))
+    if ell.size != d:
+        raise ValueError(f"lengthscales must have size {d}, got {ell.size}")
     inv_ell = 1.0 / np.maximum(ell, 1e-12)
 
-    if family in ("rbf", "gaussian"):
-        # ω_k ~ N(0, diag(inv_ell^2))
+    fam = (family or "rbf").lower()
+    if fam in ("rbf", "gaussian"):
         eps = rng.normal(loc=0.0, scale=1.0, size=(m, d))
         Omega = eps * inv_ell.reshape(1, d)
-    elif family in ("laplace", "exponential"):
-        # Approximate Laplace kernel spectral density via independent Cauchy per dim
-        # ω_k ~ Cauchy(0, inv_ell)
-        # using tangent trick: Cauchy can be sampled via tan(pi*(U-0.5))
+    elif fam in ("laplace", "exponential"):
         U = rng.uniform(low=0.0, high=1.0, size=(m, d))
         cauchy = np.tan(np.pi * (U - 0.5))
         Omega = cauchy * inv_ell.reshape(1, d)
-    elif family.startswith("matern"):
-        # Simple Gaussian scale-mixture proxy: ω ~ N(0, diag(inv_ell^2) * s) with s ~ LogNormal(0, tau)
-        # (This is an approximation; for many purposes a fixed Gaussian works well.)
-        tau = 0.25
+    elif fam.startswith("matern"):
+        tau = 0.25  # small dispersion for scale mixture
         s = rng.lognormal(mean=0.0, sigma=tau, size=(m, 1))
         eps = rng.normal(size=(m, d))
         Omega = (eps * np.sqrt(s)) * inv_ell.reshape(1, d)
     else:
-        # Fallback to Gaussian draws
+        # fallback: Gaussian draws (works reasonably in practice)
         eps = rng.normal(loc=0.0, scale=1.0, size=(m, d))
         Omega = eps * inv_ell.reshape(1, d)
 
@@ -114,60 +105,58 @@ def _rff_omegas_and_phases(
 
 def _rff_features(X: np.ndarray, Omega: np.ndarray, phases: np.ndarray) -> np.ndarray:
     """
-    Compute φ(X) = sqrt(2/m) * cos(X Ω^T + b), where:
-        X: [N, d], Omega: [m, d], phases b: [m]
-    Returns:
-        Phi: [N, m]
+    φ(X) = sqrt(2/m) * cos(X Ω^T + b)
+    X: [N, d], Omega: [m, d], phases b: [m]  ->  Φ: [N, m]
     """
-    N, d = X.shape
-    m, d2 = Omega.shape
-    assert d == d2, "Omega shape incompatible with X"
     proj = X @ Omega.T  # [N, m]
-    Phi = np.cos(proj + phases[None, :]) * np.sqrt(2.0 / float(m))
+    Phi = np.cos(proj + phases[None, :]) * np.sqrt(2.0 / float(Omega.shape[0]))
     return Phi
 
 
-def kernel_translation_invariant_rff(
+def kernel_translation_invariant_rff_mixture(
     X: np.ndarray,
     params: Dict[str, Any],
 ) -> np.ndarray:
     """
-    Approximate a translation-invariant kernel k(x - y) using Random Fourier Features.
+    Translation-invariant kernel mixture via Random Fourier Features.
+    Builds a kernel K ≈ Σ_c w_c * Φ_c Φ_c^T  and returns logits = logit_bias + amplitude * K.
 
     Expected params:
-        family: str, one of {"rbf","laplace","matern"} (default "rbf")
-        lengthscales: list|float, ARD lengthscales per latent dim (or scalar)
-        num_features: int, number of RFF features (default 512)
-        amplitude: float, overall kernel scale (default 1.0)
-        logit_bias: float, global logit bias (default -2.5)
-        seed: int (optional), for reproducible Ω, phases
+      components: List[{
+        "weight": float,
+        "family": "rbf"|"laplace"|"matern"|...,
+        "lengthscales": float | List[float] (ARD),
+        "num_features": int,
+        "seed": int (optional)
+      }, ...]
+      amplitude: float (default 1.0)
+      logit_bias: float (default -2.5)
 
     Returns:
-        logit matrix L ∈ R^{N×N} such that P = sigmoid(L)
+      logits L ∈ R^{N×N}; use sigmoid(L) for probabilities.
     """
-    family = params.get("family", "rbf")
-    lengthscales = params.get("lengthscales", 1.0)
-    num_features = int(params.get("num_features", 512))
+    comps: List[Dict[str, Any]] = params.get("components", [])
     amplitude = float(params.get("amplitude", 1.0))
     logit_bias = float(params.get("logit_bias", -2.5))
-    seed = params.get("seed", None)
+
+    if not comps:
+        raise ValueError("translation_invariant_rff_mixture: 'components' list is empty")
 
     N, d = X.shape
-    Omega, phases = _rff_omegas_and_phases(d=d, m=num_features, lengthscales=np.array(lengthscales), family=family, seed=seed)
-    Phi = _rff_features(X, Omega, phases)  # [N, m]
+    K = np.zeros((N, N), dtype=np.float64)
 
-    # Kernel approximation: K ≈ amplitude * Phi Phi^T
-    # NOTE: This forms a dense N×N matrix; for very large N consider chunking.
-    K = amplitude * (Phi @ Phi.T)
+    for c in comps:
+        w = float(c.get("weight", 1.0))
+        fam = c.get("family", "rbf")
+        ell = c.get("lengthscales", 1.0)
+        m = int(c.get("num_features", 256))
+        sd = c.get("seed", None)
 
-    # Return logits = bias + K
-    return (logit_bias + K).astype(np.float64)
+        Omega, phases = _rff_omegas_and_phases(d=d, m=m, lengthscales=ell, family=fam, seed=sd)
+        Phi = _rff_features(X, Omega, phases)  # [N, m]
+        K += w * (Phi @ Phi.T)
 
+    logits = logit_bias + amplitude * K
+    return logits
+# ====== end: RFF TI-mixture kernel ======
 
-# ---------------------------
-# Convenience dispatcher (optional)
-# ---------------------------
-
-def translation_invariant_logits(X: np.ndarray, params: Dict[str, Any]) -> np.ndarray:
-    """Alias helper for clarity."""
-    return kernel_translation_invariant_rff(X, params)

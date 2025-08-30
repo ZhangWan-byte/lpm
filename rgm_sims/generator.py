@@ -31,38 +31,74 @@ def _edge_sample_from_probs(rng, P: np.ndarray, directed: bool, self_loops: bool
         return E.astype(int)
 
 
-def _emit_node_features(rng, positions: np.ndarray, attr_cfg) -> Optional[np.ndarray]:
+# === REPLACE the _emit_node_features function with this ===
+def _emit_node_features(rng, Z: np.ndarray, blocks, node_feat_cfg) -> np.ndarray:
     """
-    Minimal emission for node features to support B1 configs.
-    If attributes.node_features.enabled and emission=='gaussian' with map=='nonlinear_random_fourier',
-    we synthesize x_i = [positions, positions^2, sin(Wz), cos(Wz)] + noise.
+    Map latent positions Z -> observed node features X with a target dim x_dim.
+    Uses a simple mix: [Z, Z^2, RFF(Z)] (+ optional block one-hot), then projects to x_dim.
+
+    node_feat_cfg.params:
+      - x_dim: int (default 40)
+      - poly: bool (default True)          # include [Z, Z^2]
+      - rff_features: int (default max(2*d, x_dim))
+      - rff_lengthscale: float (default 1.0)
+      - include_blocks_onehot: bool (default False)
+      - standardize: bool (default True)
+      - seed: int (optional; uses rng if absent)
     """
-    if not getattr(attr_cfg, "node_features", None):
+    if not getattr(node_feat_cfg, "enabled", False):
         return None
-    nf = attr_cfg.node_features
-    if not nf.enabled:
-        return None
-    if nf.emission != "gaussian":
-        return None
-    map_name = nf.params.get("map", "")
-    if map_name != "nonlinear_random_fourier":
+    if Z is None:
         return None
 
-    X = np.asarray(positions, dtype=np.float32)  # [N, d]
-    N, d = X.shape
-    m = int(nf.params.get("num_features", max(8, 4 * d)))
-    noise_sigma = float(nf.params.get("noise_sigma", 0.1))
+    N, d = Z.shape
+    params = getattr(node_feat_cfg, "params", {}) or {}
+    x_dim = int(params.get("x_dim", 40))
+    poly = bool(params.get("poly", True))
+    m_rff = int(params.get("rff_features", max(2 * d, x_dim)))
+    ell = float(params.get("rff_lengthscale", 1.0))
+    incl_blocks = bool(params.get("include_blocks_onehot", False))
+    standardize = bool(params.get("standardize", True))
 
-    # Random projection
-    W = rng.normal(0.0, 1.0, size=(d, m)).astype(np.float32)
-    P = X @ W  # [N, m]
-    feats = np.concatenate([X, X**2, np.sin(P), np.cos(P)], axis=1).astype(np.float32)
-    feats += rng.normal(0.0, noise_sigma, size=feats.shape).astype(np.float32)
-    # Standardize (zero mean / unit var)
-    mu = feats.mean(axis=0, keepdims=True)
-    sd = feats.std(axis=0, keepdims=True) + 1e-6
-    feats = (feats - mu) / sd
-    return feats
+    # local RNG (optional seed) derived from top-level rng for reproducibility
+    seed = params.get("seed", None)
+    local_rng = np.random.default_rng(rng.integers(0, 2**31 - 1) if seed is None else int(seed))
+
+    feats = []
+    if poly:
+        feats.append(Z)
+        feats.append(Z ** 2)
+
+    # Random Fourier Features (RFF) for a stationary bump in feature space
+    W = local_rng.normal(loc=0.0, scale=1.0 / max(ell, 1e-6), size=(d, m_rff))
+    b = local_rng.uniform(low=0.0, high=2 * np.pi, size=(m_rff,))
+    Phi = np.sqrt(2.0 / float(m_rff)) * np.cos(Z @ W + b)  # [N, m_rff]
+    feats.append(Phi)
+
+    if incl_blocks and blocks is not None:
+        K = int(np.max(blocks)) + 1
+        onehot = np.eye(K, dtype=np.float32)[blocks]
+        feats.append(onehot)
+
+    F = np.concatenate(feats, axis=1).astype(np.float32)  # [N, D_total]
+
+    # Project (or pad) to target x_dim
+    D_total = F.shape[1]
+    if D_total > x_dim:
+        P = local_rng.normal(loc=0.0, scale=1.0 / np.sqrt(D_total), size=(D_total, x_dim)).astype(np.float32)
+        X = F @ P
+    elif D_total < x_dim:
+        pad = np.zeros((N, x_dim - D_total), dtype=np.float32)
+        X = np.hstack([F, pad])
+    else:
+        X = F
+
+    if standardize:
+        mu = X.mean(axis=0, keepdims=True)
+        sd = X.std(axis=0, keepdims=True) + 1e-6
+        X = (X - mu) / sd
+
+    return X.astype(np.float32)
 
 
 def generate_graph(cfg: SimConfig) -> Dict[str, Any]:
@@ -135,9 +171,11 @@ def generate_graph(cfg: SimConfig) -> Dict[str, Any]:
         S_vals = np.array(cfg.kernel.params.get("S_values"))
         logit = K.kernel_indefinite_linear(X, S_vals, cfg.kernel.params.get("logit_bias", -2.2))
         P = SIGMOID(logit)
-    elif cfg.kernel.type == "translation_invariant":
-        # NEW: translation-invariant via RFF
-        logit = K.translation_invariant_logits(X, cfg.kernel.params)
+    elif cfg.kernel.type == "translation_invariant_rff_mixture":
+        # Uses latent positions X (undirected, translation-invariant)
+        if X is None:
+            raise ValueError("translation_invariant_rff_mixture requires point latents X (not product_gaussian).")
+        logit = K.kernel_translation_invariant_rff_mixture(X, cfg.kernel.params)
         P = SIGMOID(logit)
     else:
         raise NotImplementedError(f"Kernel {cfg.kernel.type}")
@@ -163,17 +201,19 @@ def generate_graph(cfg: SimConfig) -> Dict[str, Any]:
     # Sample edges
     E = _edge_sample_from_probs(rng, P, directed=directed, self_loops=cfg.graph.self_loops)
 
-    # OPTIONAL: synthesize node features if requested by config
-    node_feats = _emit_node_features(rng, X if X is not None else np.zeros((N, d)), cfg.attributes)
+    # ----- NEW: node features from latent positions -----
+    # choose Z for features: use X if present, else concatenate out/in if product-Gaussian
+    Z_feat = None
+    if X is not None:
+        Z_feat = X
+    elif (X_out is not None) and (X_in is not None):
+        Z_feat = np.concatenate([X_out, X_in], axis=1)
 
-    extra = {}
-    if node_feats is not None:
-        extra["node_features"] = node_feats
-    if X_out is not None:
-        extra["positions_out"] = X_out
-        extra["positions_in"] = X_in
-    if z_blocks is not None:
-        extra["blocks"] = z_blocks
+    node_feat_cfg = cfg.attributes.node_features if hasattr(cfg.attributes, "node_features") else None
+    node_features = None
+    if node_feat_cfg is not None:
+        node_features = _emit_node_features(rng, Z_feat, z_blocks, node_feat_cfg)
+    # -----------------------------------------------------
 
     return {
         "edges": E,
@@ -182,5 +222,5 @@ def generate_graph(cfg: SimConfig) -> Dict[str, Any]:
         "positions_in": X_in,
         "blocks": z_blocks,
         "prob_matrix_summary": dict(mean=float(P.mean()), min=float(P.min()), max=float(P.max())),
-        **extra,
+        "node_features": node_features,   # <-- include for saving
     }

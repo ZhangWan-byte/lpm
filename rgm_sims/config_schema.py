@@ -10,7 +10,7 @@ BaseMeasureType = Literal[
 ]
 KernelType = Literal[
     "block_constant", "radial_smooth", "directed_bilinear",
-    "heterophily_indefinite", "translation_invariant"
+    "heterophily_indefinite", "translation_invariant_rff_mixture"
 ]
 
 class GraphCfg(BaseModel):
