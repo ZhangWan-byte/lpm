@@ -308,6 +308,12 @@ def main():
     feats0 = load_node_features(graph_dirs[0], standardize=True)
     input_dim = feats0.shape[1]
     model = build_model(input_dim, args).to(device)
+    print("Params: total: {}, encoder: {}, edge decoder: {}, node decoder: {}".format(
+        sum(p.numel() for p in model.parameters()),
+        sum(p.numel() for p in model.encoder.parameters()),
+        sum(p.numel() for p in model.decoder.parameters()),
+        sum(p.numel() for p in model.feature_decoder.parameters())
+    ))
     opt = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
 
     # Preload splits and adjacency/feats into memory
