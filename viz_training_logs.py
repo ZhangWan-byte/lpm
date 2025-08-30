@@ -3,7 +3,7 @@
 Visualize RG-VAE training logs saved by exp1_train_batch.py with consistent run colors.
 
 - Single run: saves inside that run's directory.
-- Multiple runs: saves in a comparison directory (default results/compare_<MMDD_HHMM> or --out).
+- Multiple runs: saves in a comparison directory (default results/<MMDD_HHMM>_compare or --out).
 - Each run gets a base color + a lighter tint for train/val (and AUC/AP, GWD/LP-RMSE).
 
 Usage:
@@ -218,7 +218,7 @@ def main():
     multi = len(loaded) > 1
     # Output dir
     if multi:
-        out_dir = args.out or os.path.join("results", f"compare_{datetime.now().strftime('%m%d_%H%M')}")
+        out_dir = args.out or os.path.join("results", f"{datetime.now().strftime('%m%d_%H%M')}_compare")
         os.makedirs(out_dir, exist_ok=True)
         print(f"[INFO] Saving combined figures & summary to: {out_dir}")
     else:

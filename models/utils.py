@@ -95,36 +95,133 @@ def split_edges(edges: np.ndarray, val_frac: float, test_frac: float, seed: int,
     return {"train": train_edges, "val": val_edges, "test": test_edges}
 
 
-def negative_sampling(N: int, num_samples: int, exclude: Optional[set]=None, undirected: bool=True, rng: Optional[np.random.Generator]=None) -> np.ndarray:
-    if rng is None:
-        rng = np.random.default_rng()
-    negs = set()
-    tries = 0
-    max_tries = num_samples * 20 + 1000
-    while len(negs) < num_samples and tries < max_tries:
-        i = int(rng.integers(0, N))
-        j = int(rng.integers(0, N))
-        if i == j:
-            tries += 1
-            continue
-        a, b = (i, j) if (i < j or not undirected) else (j, i)
-        if exclude and ((a, b) in exclude or (b, a) in exclude):
-            tries += 1
-            continue
-        negs.add((a, b))
-        tries += 1
-    if len(negs) < num_samples:
-        # fall back: fill remaining by simple grid walk (rare)
-        i = 0
-        while len(negs) < num_samples:
-            a = i % N
-            b = (i*7 + 3) % N
-            if a != b:
-                tup = (a, b) if (a < b or not undirected) else (b, a)
-                if not exclude or (tup not in exclude and (tup[1], tup[0]) not in exclude):
-                    negs.add(tup)
-            i += 1
-    return np.array(list(negs), dtype=int)
+# def negative_sampling(N: int, num_samples: int, exclude: Optional[set]=None, undirected: bool=True, rng: Optional[np.random.Generator]=None) -> np.ndarray:
+#     if rng is None:
+#         rng = np.random.default_rng()
+#     negs = set()
+#     tries = 0
+#     max_tries = num_samples * 20 + 1000
+#     while len(negs) < num_samples and tries < max_tries:
+#         i = int(rng.integers(0, N))
+#         j = int(rng.integers(0, N))
+#         if i == j:
+#             tries += 1
+#             continue
+#         a, b = (i, j) if (i < j or not undirected) else (j, i)
+#         if exclude and ((a, b) in exclude or (b, a) in exclude):
+#             tries += 1
+#             continue
+#         negs.add((a, b))
+#         tries += 1
+#     if len(negs) < num_samples:
+#         # fall back: fill remaining by simple grid walk (rare)
+#         i = 0
+#         while len(negs) < num_samples:
+#             a = i % N
+#             b = (i*7 + 3) % N
+#             if a != b:
+#                 tup = (a, b) if (a < b or not undirected) else (b, a)
+#                 if not exclude or (tup not in exclude and (tup[1], tup[0]) not in exclude):
+#                     negs.add(tup)
+#             i += 1
+#     return np.array(list(negs), dtype=int)
+
+
+# models/utils.py  (drop-in replacement)
+def negative_sampling(
+    N: int,
+    num_samples: int,
+    exclude: Optional[set] = None,
+    undirected: bool = True,
+    rng: Optional[np.random.Generator] = None,
+    device: Optional[torch.device] = None,
+) -> np.ndarray:
+    """
+    Fast vectorized negative sampler.
+    Generates more candidates than needed, canonicalizes (i<j) for undirected,
+    removes self-loops and existing edges, and returns unique pairs.
+    """
+    if num_samples <= 0 or N <= 1:
+        return np.zeros((0, 2), dtype=int)
+
+    dev = device or torch.device("cpu")
+
+    # Hash existing edges once for O(1) membership tests via numpy isin on CPU
+    # Edge id: i*N + j with i<j for undirected, raw (i,j) for directed.
+    excl_ids = None
+    if exclude:
+        if undirected:
+            ex = np.array(
+                [(min(a, b), max(a, b)) for (a, b) in exclude if a != b],
+                dtype=np.int64,
+            )
+            if ex.size > 0:
+                excl_ids = ex[:, 0] * np.int64(N) + ex[:, 1]
+        else:
+            ex = np.array([(a, b) for (a, b) in exclude if a != b], dtype=np.int64)
+            if ex.size > 0:
+                excl_ids = ex[:, 0] * np.int64(N) + ex[:, 1]
+
+    out_pairs = []
+    need = num_samples
+    # A couple of rounds of oversampling is typically enough even for dense graphs
+    for overshoot in (2.0, 1.5, 1.2):
+        k = max(need, 1)
+        m = int(k * overshoot)
+
+        ij = torch.randint(N, (m, 2), device=dev)
+        # drop self-loops
+        mask = ij[:, 0] != ij[:, 1]
+        ij = ij[mask]
+
+        if undirected:
+            # canonicalize i<j
+            lo = torch.minimum(ij[:, 0], ij[:, 1])
+            hi = torch.maximum(ij[:, 0], ij[:, 1])
+            ij = torch.stack([lo, hi], dim=1)
+
+        # dedupe inside this batch
+        ij = torch.unique(ij, dim=0)
+
+        # compute edge ids and filter by exclude on CPU
+        ids = (ij[:, 0].to(torch.long) * N + ij[:, 1].to(torch.long)).cpu().numpy()
+        if excl_ids is not None and ids.size > 0:
+            keep = ~np.isin(ids, excl_ids, assume_unique=False)
+            ij = ij[torch.from_numpy(keep).to(ij.device)]
+
+        if ij.size(0) > 0:
+            take = min(need, ij.size(0))
+            out_pairs.append(ij[:take].cpu().numpy())
+            need -= take
+            if need <= 0:
+                break
+
+    if need > 0:
+        # very rare fallback: fill any shortfall by a simple arithmetic walk (still no while-loop)
+        a = np.arange(need) % N
+        b = (np.arange(need) * 7 + 3) % N
+        if undirected:
+            lo = np.minimum(a, b)
+            hi = np.maximum(a, b)
+            ab = np.stack([lo, hi], axis=1)
+        else:
+            ab = np.stack([a, b], axis=1)
+        # remove self loops and excludes
+        ab = ab[ab[:, 0] != ab[:, 1]]
+        if excl_ids is not None and ab.size > 0:
+            ids = ab[:, 0] * N + ab[:, 1]
+            ab = ab[~np.isin(ids, excl_ids, assume_unique=False)]
+        if ab.size > 0:
+            out_pairs.append(ab[:need])
+
+    if not out_pairs:
+        return np.zeros((0, 2), dtype=int)
+    out = np.vstack(out_pairs)
+    # final dedupe (cheap at this size)
+    out = np.unique(out, axis=0)
+    if out.shape[0] > num_samples:
+        out = out[:num_samples]
+    return out.astype(int)
 
 
 def bce_logits(logits: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:

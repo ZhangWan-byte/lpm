@@ -28,25 +28,41 @@ Outputs edge list, node table (latent positions, block/attrs), and a metadata JS
 A1 (linux)
 
 ```bash
-python exp1_train_batch.py --setting_dir sim_data_batch/A1 --results_dir results --epochs 120 --latent_dim 16 --hidden 64 --decoder dot --decoder_kwargs '{}' --neg_ratio 5 --lambda_feat 1.0 --lambda_kl 0.005 --kl_warmup_epochs 60 --val_auc_neg_ratio 1 --lr 5e-4
+python exp1_train_batch.py --setting_dir sim_data_batch/A1 --results_dir results --epochs 200 --latent_dim 16 --hidden 128 --decoder dot --decoder_kwargs '{}' --neg_ratio 10 --lambda_feat 1.0 --lambda_kl 0.005 --kl_warmup_epochs 100 --val_auc_neg_ratio 1 --lr 5e-4
+```
+
+```bash
+python exp1_train_batch.py --setting_dir sim_data_batch/A1 --results_dir results --epochs 200 --latent_dim 16 --hidden 128 --decoder rff --decoder_kwargs '{\"num_features\":1024,\"lengthscale\":1.2,\"ard\":true,\"learn_lengthscale\":true,\"learn_omegas\":false,\"seed\":0}' --neg_ratio 10 --lambda_feat 1.0 --lambda_kl 0.005 --kl_warmup_epochs 100 --val_auc_neg_ratio 1 --lr 5e-4
 ```
 
 A1 (windows)
 
 ```bash
-python exp1_train_batch.py --setting_dir sim_data_batch\A1 --results_dir results --epochs 120 --latent_dim 16 --hidden 64 --decoder dot --decoder_kwargs "{}" --neg_ratio 5 --lambda_feat 1.0 --lambda_kl 0.005 --kl_warmup_epochs 60 --val_auc_neg_ratio 1 --lr 5e-4
+python exp1_train_batch.py --setting_dir sim_data_batch\A1 --results_dir results --epochs 200 --latent_dim 16 --hidden 128 --decoder dot --decoder_kwargs "{}" --neg_ratio 10 --lambda_feat 1.0 --lambda_kl 0.005 --kl_warmup_epochs 100 --val_auc_neg_ratio 1 --lr 5e-4
+```
+
+```bash
+python exp1_train_batch.py --setting_dir sim_data_batch\A1 --results_dir results --epochs 200 --latent_dim 16 --hidden 128 --decoder rff --decoder_kwargs "{\"num_features\":1024,\"lengthscale\":1.2,\"ard\":true,\"learn_lengthscale\":true,\"learn_omegas\":false,\"seed\":0}" --neg_ratio 10 --lambda_feat 1.0 --lambda_kl 0.005 --kl_warmup_epochs 100 --val_auc_neg_ratio 1 --lr 5e-4
 ```
 
 A2 (linux)
 
 ```bash
-python exp1_train_batch.py --setting_dir sim_data_batch/A2 --results_dir results --epochs 150 --latent_dim 16 --hidden 128 --decoder radial --decoder_kwargs '{}' --neg_ratio 10 --lambda_feat 1.0 --lambda_kl 0.005 --kl_warmup_epochs 100 --val_auc_neg_ratio 1 --lr 5e-4
+python exp1_train_batch.py --setting_dir sim_data_batch/A2 --results_dir results --epochs 200 --latent_dim 16 --hidden 128 --decoder radial --decoder_kwargs '{}' --neg_ratio 10 --lambda_feat 1.0 --lambda_kl 0.005 --kl_warmup_epochs 100 --val_auc_neg_ratio 1 --lr 5e-4
+```
+
+```bash
+python exp1_train_batch.py --setting_dir sim_data_batch/A2 --results_dir results --epochs 200 --latent_dim 16 --hidden 128 --decoder rff --decoder_kwargs '{"num_features":1024,"lengthscale":1.2,"ard":true,"learn_lengthscale":true,"learn_omegas":false,"seed":0}' --neg_ratio 10 --lambda_feat 1.0 --lambda_kl 0.005 --kl_warmup_epochs 100 --val_auc_neg_ratio 1 --lr 5e-4
 ```
 
 A2 (windows)
 
 ```bash
-python exp1_train_batch.py --setting_dir sim_data_batch\A2 --results_dir results --epochs 150 --latent_dim 16 --hidden 128 --decoder radial --decoder_kwargs "{}" --neg_ratio 10 --lambda_feat 1.0 --lambda_kl 0.005 --kl_warmup_epochs 100 --val_auc_neg_ratio 1 --lr 5e-4
+python exp1_train_batch.py --setting_dir sim_data_batch\A2 --results_dir results --epochs 200 --latent_dim 16 --hidden 128 --decoder radial --decoder_kwargs "{}" --neg_ratio 10 --lambda_feat 1.0 --lambda_kl 0.005 --kl_warmup_epochs 100 --val_auc_neg_ratio 1 --lr 5e-4
+```
+
+```bash
+python exp1_train_batch.py --setting_dir sim_data_batch\A2 --results_dir results --epochs 200 --latent_dim 16 --hidden 128 --decoder rff --decoder_kwargs "{\"num_features\":1024,\"lengthscale\":1.2,\"ard\":true,\"learn_lengthscale\":true,\"learn_omegas\":false,\"seed\":0}" --neg_ratio 10 --lambda_feat 1.0 --lambda_kl 0.005 --kl_warmup_epochs 100 --val_auc_neg_ratio 1 --lr 5e-4
 ```
 
 B1 (linux)

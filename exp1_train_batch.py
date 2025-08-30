@@ -19,6 +19,8 @@ import argparse
 from datetime import datetime
 from typing import List, Dict, Tuple, Optional
 
+from tqdm import tqdm
+
 # --- force line-buffered, auto-flushing prints (good for Slurm) ---
 try:
     sys.stdout.reconfigure(line_buffering=True)
@@ -110,7 +112,7 @@ def step_graph(model: RG_VAE,
                lambda_kl: float) -> Tuple[torch.Tensor, Dict[str, float]]:
     n_pos = pos_edges.shape[0]
     neg_edges = negative_sampling(
-        A_norm.size(0), max(1, n_pos * neg_ratio), exclude=exclude_pairs, undirected=undirected
+        A_norm.size(0), max(1, n_pos * neg_ratio), exclude=exclude_pairs, undirected=undirected, device=device
     )
     pos = torch.from_numpy(pos_edges).long().to(device)
     neg = torch.from_numpy(neg_edges).long().to(device)
@@ -130,7 +132,7 @@ def val_metrics(model: RG_VAE,
         Z = model.embed(A_norm, feats=feats_t)  # [N, D]
         pos = torch.from_numpy(val_edges).long().to(device)
         neg_edges = negative_sampling(
-            A_norm.size(0), max(1, val_edges.shape[0] * neg_ratio_for_auc), exclude=exclude_pairs, undirected=undirected
+            A_norm.size(0), max(1, val_edges.shape[0] * neg_ratio_for_auc), exclude=exclude_pairs, undirected=undirected, device=device
         )
         neg = torch.from_numpy(neg_edges).long().to(device)
         pairs = torch.cat([pos, neg], dim=0)
@@ -347,7 +349,7 @@ def main():
         model.train()
         tr_totals = tr_edges = tr_feats = tr_kls = 0.0
 
-        for (_, _, _, undirected, A_norm, feats_t, tr, _, exclude) in loaded:
+        for (_, _, _, undirected, A_norm, feats_t, tr, _, exclude) in tqdm(loaded, desc=f"Epoch {epoch:03d}", ncols=80, file=sys.stdout):
             loss, stats = step_graph(
                 model, A_norm, feats_t, tr, args.neg_ratio, undirected, exclude, device,
                 lambda_feat=args.lambda_feat, lambda_kl=lam_kl
