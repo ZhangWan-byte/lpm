@@ -97,6 +97,8 @@ def build_model(input_dim: int, args) -> RG_VAE:
         decoder=args.decoder,
         decoder_kwargs=dec_kwargs,
         feat_dec_hidden=args.feat_dec_hidden,
+        feature_likelihood=args.feature_likelihood,
+        
     )
     return model
 
