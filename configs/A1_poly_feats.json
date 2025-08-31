@@ -1,0 +1,52 @@
+{
+  "name": "A1_SBM_GaussK4",
+  "seed": 123,
+  "graph": { "N": 5000, "expected_degree": 40, "directed": false, "self_loops": false },
+
+  "latent_space": {
+    "dimension": 2,
+    "base_measure": {
+      "type": "gaussian_mixture",
+      "params": {
+        "K": 4,
+        "weights": [0.25, 0.25, 0.25, 0.25],
+        "means": [[2.5, 0.0], [0.0, 2.5], [-2.5, 0.0], [0.0, -2.5]],
+        "cov_scale": 0.5
+      }
+    }
+  },
+
+  "kernel": {
+    "type": "block_constant",
+    "params": {
+      "B": [
+        [0.08, 0.01, 0.01, 0.01],
+        [0.01, 0.08, 0.01, 0.01],
+        [0.01, 0.01, 0.08, 0.01],
+        [0.01, 0.01, 0.01, 0.08]
+      ]
+    }
+  },
+
+  "degree_correction": { "enabled": false, "distribution": "lognormal", "params": { "mu": 0.0, "sigma": 0.0 } },
+
+  "attributes": {
+    "node_features": {
+      "enabled": true,
+      "emission": "gaussian",
+      "params": {
+        "x_dim": 5,
+        "poly": true,
+        "rff_features": 0,
+        "rff_lengthscale": 0.0,
+        "include_blocks_onehot": false,
+        "standardize": true
+      }
+    },
+    "edge_features": { "enabled": false, "emission": "none", "params": {} }
+  },
+
+  "observation": { "missing_edges": { "type": "MAR", "rate": 0.10 } },
+  "evaluation": { "holdout_edge_fraction": 0.20, "negative_sampling_ratio": 5 },
+  "temporal": { "enabled": false, "steps": 0, "deformation": { "bandwidth_scale_per_step": 1.0 } }
+}

@@ -50,10 +50,10 @@ def synthesize_node_features(out_npz_path: str, x_dim: int = 16, seed: int = 7):
     # Save back
     np.savez(out_npz_path, **{k: data[k] for k in data.files}, node_features=X)
 
-
+# python generate_batch.py --setting A1_poly_feats --out_root ./sim_data_batch --sizes 50,75,100,125,150,175,200,225,250,275,300 --per_size 10 --val_per_size 2 --test_per_size 2 --seed 123 --x_dim 5
 def main():
     ap = argparse.ArgumentParser(description="Batch simulate A1/A2/B1 graphs into sim_data_batch/<SETTING>")
-    ap.add_argument("--setting", required=True, choices=["A1", "A2", "B1"])
+    ap.add_argument("--setting", required=True, choices=["A1", "A1_poly_feats", "A2", "B1"])
     ap.add_argument("--out_root", default="sim_data_batch")
     ap.add_argument("--sizes", default="2000,5000,10000", help="Comma-separated N per graph")
     ap.add_argument("--per_size", type=int, default=10, help="#graphs per size for TRAIN")
@@ -70,10 +70,12 @@ def main():
     rng = np.random.default_rng(args.seed)
     ensure_dir(setting_dir)
 
-    cfg_dict = {"A1": json.load(open(os.path.join(REPO_ROOT, "configs", "A1.json"))), \
-                "A2": json.load(open(os.path.join(REPO_ROOT, "configs", "A2.json"))), \
-                "B1": json.load(open(os.path.join(REPO_ROOT, "configs", "B1.json")))
-            }[args.setting]
+    # cfg_dict = {"A1": json.load(open(os.path.join(REPO_ROOT, "configs", "A1.json"))), \
+    #             "A2": json.load(open(os.path.join(REPO_ROOT, "configs", "A2.json"))), \
+    #             "B1": json.load(open(os.path.join(REPO_ROOT, "configs", "B1.json")))
+    #         }[args.setting]
+
+    cfg_dict = json.load(open(os.path.join(REPO_ROOT, "configs", f"{args.setting}.json")))
 
     total = 0
     for split_name, k in splits:

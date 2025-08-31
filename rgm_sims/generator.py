@@ -67,13 +67,17 @@ def _emit_node_features(rng, Z: np.ndarray, blocks, node_feat_cfg) -> np.ndarray
     feats = []
     if poly:
         feats.append(Z)
-        feats.append(Z ** 2)
+        feats.append(2 * Z**2)
+        feats.append((-1) * Z**5)
+        feats.append(3 * np.log(Z))
+        feats.append(np.exp(Z))
 
-    # Random Fourier Features (RFF) for a stationary bump in feature space
-    W = local_rng.normal(loc=0.0, scale=1.0 / max(ell, 1e-6), size=(d, m_rff))
-    b = local_rng.uniform(low=0.0, high=2 * np.pi, size=(m_rff,))
-    Phi = np.sqrt(2.0 / float(m_rff)) * np.cos(Z @ W + b)  # [N, m_rff]
-    feats.append(Phi)
+    if m_rff > 0:
+        # Random Fourier Features (RFF) for a stationary bump in feature space
+        W = local_rng.normal(loc=0.0, scale=1.0 / max(ell, 1e-6), size=(d, m_rff))
+        b = local_rng.uniform(low=0.0, high=2 * np.pi, size=(m_rff,))
+        Phi = np.sqrt(2.0 / float(m_rff)) * np.cos(Z @ W + b)  # [N, m_rff]
+        feats.append(Phi)
 
     if incl_blocks and blocks is not None:
         K = int(np.max(blocks)) + 1
