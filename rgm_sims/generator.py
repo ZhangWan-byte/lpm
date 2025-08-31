@@ -68,8 +68,8 @@ def _emit_node_features(rng, Z: np.ndarray, blocks, node_feat_cfg) -> np.ndarray
     if poly:
         feats.append(Z)
         feats.append(Z**2)
-        feats.append(3 * np.log(Z))
         feats.append(np.exp(Z))
+    # print(len(feats))
 
     if m_rff > 0:
         # Random Fourier Features (RFF) for a stationary bump in feature space
@@ -95,7 +95,8 @@ def _emit_node_features(rng, Z: np.ndarray, blocks, node_feat_cfg) -> np.ndarray
         X = np.hstack([F, pad])
     else:
         X = F
-
+    # print(X.shape)
+    # print(X)
     if standardize:
         mu = X.mean(axis=0, keepdims=True)
         sd = X.std(axis=0, keepdims=True) + 1e-6
