@@ -28,6 +28,7 @@ class NodeEncoder(nn.Module):
         super().__init__()
         self.gc1 = GraphConv(in_dim, hidden)
         self.gc2 = GraphConv(hidden, hidden) if layers >= 2 else None
+        # We use `mu` as a general linear head; for Poisson latents we interpret it as log-rate.
         self.mu = nn.Linear(hidden, latent_dim)
         self.logvar = nn.Linear(hidden, latent_dim)
 
@@ -397,25 +398,72 @@ class RG_VAE(nn.Module):
 
 
 # ---------------------------
-# Poisson-latent RG-VAE (RG-P-VAE)
+# Poisson rsample utility (Algorithm 1 in [4])
+# ---------------------------
+
+class PoissonRsample(nn.Module):
+    """
+    Relaxed Poisson reparameterization via inter-arrival times (Algorithm 1 in Poisson VAE):
+        1) Sample Δt ~ Exponential(rate=λ) with .rsample (pathwise gradients).
+        2) times = cumsum(Δt, dim=0).
+        3) indicator = sigmoid((1 - times) / T)  (soft 'event within window' test).
+        4) z_relaxed = sum(indicator, dim=0). Shape: [B, K].
+
+    Args:
+        n_exp: number of exponential inter-arrival times to draw (truncation).
+        temperature: T > 0, controls relaxation sharpness (→0 approaches hard counts).
+    """
+    def __init__(self, n_exp: int = 64, temperature: float = 0.1):
+        super().__init__()
+        self.n_exp = int(n_exp)
+        self.temperature = float(temperature)
+
+    def forward(self, lam: torch.Tensor) -> torch.Tensor:
+        """
+        lam: [B, K] strictly positive rates.
+        Returns: z_relaxed [B, K], differentiable w.r.t. lam.
+        """
+        # Expand lam to [n_exp, B, K]
+        rate = lam.clamp_min(1e-12)  # safety
+        exp = torch.distributions.Exponential(rate)
+        # rsample shape is broadcast across batch dims when we pass sample_shape
+        dt = exp.rsample((self.n_exp,))                 # [n_exp, B, K]
+        times = torch.cumsum(dt, dim=0)                 # [n_exp, B, K]
+        indicator = torch.sigmoid((1.0 - times) / self.temperature)
+        z_relaxed = indicator.sum(dim=0)                # [B, K]
+        return z_relaxed
+
+    @torch.no_grad()
+    def hard_sample(self, lam: torch.Tensor) -> torch.Tensor:
+        """Non-differentiable hard sample: counts via thresholding (for eval/visualization)."""
+        rate = lam.clamp_min(1e-12)
+        dt = torch.distributions.Exponential(rate).sample((self.n_exp,))  # [n_exp, B, K]
+        times = torch.cumsum(dt, dim=0)
+        z = (times <= 1.0).sum(dim=0).to(lam.dtype)                       # [B, K]
+        return z
+
+
+# ---------------------------
+# Poisson-latent RG-VAE (RG-P-VAE) with pathwise rsample
 # ---------------------------
 
 class RG_P_VAE(nn.Module):
     """
-    Poisson-latent variant of RG-VAE.
+    Poisson-latent variant with reparameterized sampling (Algorithm 1 in [4]) integrated
+    into the RG framework.
 
-    - Latents: z ∈ ℕ_+^{D}, with amortized posterior q(z|x) = Π_d Poisson(λ_qd(x)).
-    - Prior:   p(z) = Π_d Poisson(λ_pd), with learnable (or fixed) rates.
-    - KL(q||p) has a closed-form: KL = Σ_d [ λ_q log(λ_q/λ_p) + λ_p - λ_q ].
-    - Reconstruction terms are computed on a Monte-Carlo sample z~q; encoder gradients
-      are estimated via REINFORCE with a learnable scalar baseline. Decoder parameters
-      receive standard backprop through the reconstruction losses.
+    Latents:
+        q_ϕ(z|x) = ∏_d Poisson(z_d ; λ_qd(x)),
+        p(z)     = ∏_d Poisson(z_d ; λ_pd), with learnable or fixed λ_p.
 
-    Notes:
-    * This stays faithful to Poisson-latent modeling without relying on a custom
-      reparameterization; it's robust and simple to integrate into your pipeline.
-    * For lower-variance but biased training you can switch to 'use_mean_embed=True'
-      which uses E_q[z]=λ_q as the embedding instead of samples.
+    Training:
+        - Draw a relaxed Poisson sample z̃ ~ q_ϕ(z|x) using PoissonRsample (pathwise).
+        - Map z̃ to continuous latent positions ϕ(z̃) for the edge decoder.
+        - Compute reconstruction losses for edges and (optionally) node features.
+        - Add closed-form KL(Pois(λ_q) || Pois(λ_p)) and an optional metabolic penalty β·Σ λ_q.
+
+    This keeps your edge decoders (radial/dot/mlp/rff/…) intact and supplies them with
+    differentiable latent positions derived from Poisson counts.
     """
     def __init__(
         self,
@@ -427,16 +475,17 @@ class RG_P_VAE(nn.Module):
         decoder: str = "radial",         # edge decoder name
         decoder_kwargs: Optional[dict] = None,
         feat_dec_hidden: int = 64,
-        feature_likelihood: str = "gaussian",  # "gaussian" or "poisson"
+        feature_likelihood: str = "poisson",  # "gaussian" or "poisson"
         poisson_full: bool = False,      # include Stirling term in Poisson NLL (usually False)
         prior_rate_init: float = 1.0,    # init for Poisson prior rates λ_p
         prior_learnable: bool = True,    # learn λ_p
-        embed_log1p: bool = True,        # apply log1p to counts before projection
-        embed_linear: bool = True,       # learn a Linear projection from counts to latent space
-        use_mean_embed: bool = False,    # use E_q[z]=λ_q instead of sampling (biased but low-variance)
-        reinforce_weight: float = 1.0,   # weight on REINFORCE term
-        beta_metabolic: float = 0.0,     # β * E_q[sum z], metabolic/predictive-coding style cost
         eps_rate: float = 1e-6,          # numerical floor for rates
+        # rsample / embedding
+        n_exp: int = 64,
+        temperature: float = 0.1,
+        embed_mode: str = "log1p_linear",  # {"log1p_linear","identity","log1p"}
+        embed_out_dim: Optional[int] = None,  # if set, project to this dim before decoders
+        beta_metabolic: float = 0.0,        # β * E_q[sum z] = β * sum λ_q
     ):
         super().__init__()
         self.latent_dim = latent_dim
@@ -444,15 +493,11 @@ class RG_P_VAE(nn.Module):
         self.struct_dim = 3 if use_struct_feats else 0
 
         self.poisson_full = bool(poisson_full)
-        self.use_mean_embed = bool(use_mean_embed)
-        self.embed_log1p = bool(embed_log1p)
-        self.embed_linear = bool(embed_linear)
-        self.reinforce_weight = float(reinforce_weight)
-        self.beta_metabolic = float(beta_metabolic)
         self.eps_rate = float(eps_rate)
+        self.beta_metabolic = float(beta_metabolic)
 
         enc_in = input_dim + self.struct_dim
-        # We reuse NodeEncoder and take its 'mu' head as log-rate for q(z|x).
+        # We reuse NodeEncoder.mu as a log-rate head for Poisson latents; ignore logvar.
         self.encoder = NodeEncoder(in_dim=enc_in, hidden=hidden, latent_dim=latent_dim, layers=enc_layers)
 
         # Poisson prior rates (per-dimension)
@@ -461,25 +506,32 @@ class RG_P_VAE(nn.Module):
 
         # Edge decoder (same family as RG_VAE)
         self.decoder_name = (decoder or "radial").lower()
-        self.decoder = self._make_edge_decoder(self.decoder_name, latent_dim, (decoder_kwargs or {}))
+        self.decoder = self._make_edge_decoder(self.decoder_name, latent_dim if embed_out_dim is None else embed_out_dim, (decoder_kwargs or {}))
 
-        # Feature decoder
+        # Feature decoder (Gaussian or Poisson) — consumes the same embedding as the edge decoder
         self.feat_likelihood_name = (feature_likelihood or "gaussian").lower()
+        feat_in_dim = latent_dim if embed_out_dim is None else embed_out_dim
         if self.feat_likelihood_name == "gaussian":
-            self.feature_decoder = FeatureDecoderGaussian(latent_dim=latent_dim, x_dim=input_dim, hidden=feat_dec_hidden)
+            self.feature_decoder = FeatureDecoderGaussian(latent_dim=feat_in_dim, x_dim=input_dim, hidden=feat_dec_hidden)
         elif self.feat_likelihood_name == "poisson":
-            self.feature_decoder = FeatureDecoderPoisson(latent_dim=latent_dim, x_dim=input_dim, hidden=feat_dec_hidden)
+            self.feature_decoder = FeatureDecoderPoisson(latent_dim=feat_in_dim, x_dim=input_dim, hidden=feat_dec_hidden)
         else:
             raise ValueError(f"Unknown feature_likelihood '{feature_likelihood}'. Use 'gaussian' or 'poisson'.")
 
-        # Optional learned projection from count-vector to continuous latent for decoders
-        if self.embed_linear:
-            self.counts_proj = nn.Linear(latent_dim, latent_dim)
-        else:
-            self.counts_proj = nn.Identity()
+        # rsample module
+        self.poisson_rsample = PoissonRsample(n_exp=n_exp, temperature=temperature)
 
-        # Scalar learnable baseline for REINFORCE variance reduction
-        self.baseline = nn.Parameter(torch.tensor(0.0))
+        # embedding config
+        self.embed_mode = embed_mode.lower()
+        self.embed_out_dim = embed_out_dim
+        if self.embed_mode not in {"log1p_linear", "identity", "log1p"}:
+            raise ValueError(f"Unknown embed_mode '{embed_mode}'")
+        if self.embed_mode == "log1p_linear":
+            out_dim = latent_dim if embed_out_dim is None else embed_out_dim
+            self.embed_lin = nn.Linear(latent_dim, out_dim)
+        elif self.embed_out_dim is not None:
+            # identity/log1p but changing dimensionality is unsupported
+            raise ValueError("embed_out_dim can only be set with embed_mode='log1p_linear'.")
 
     # ---- utilities ----
 
@@ -530,27 +582,31 @@ class RG_P_VAE(nn.Module):
     def encode_posterior_rate(self, A_norm: torch.Tensor, feats: torch.Tensor) -> torch.Tensor:
         """
         Returns elementwise posterior rates λ_q(x) (shape: [N, D]).
-        We interpret the encoder's 'mu' output as log-rate.
+        We interpret the encoder's 'mu' output as pre-activation for rate; softplus→positive.
         """
         x = self._compose_encoder_input(A_norm, feats)
-        log_rate_q, _ = self.encoder(A_norm, x)  # [N, D], ignore logvar
-        # Softplus to ensure positivity, keep small floor for stability.
+        log_rate_q, _ = self.encoder(A_norm, x)  # [N, D]; ignore 'logvar' head
         lambda_q = F.softplus(log_rate_q) + self.eps_rate
         return lambda_q
 
     def prior_rate(self) -> torch.Tensor:
         return F.softplus(self.prior_log_rate) + self.eps_rate  # [D]
 
-    # ---- embedding transform for counts ----
+    # ---- embedding transform for (relaxed) counts ----
 
     def _to_embedding(self, z_counts: torch.Tensor) -> torch.Tensor:
         """
-        Map discrete count vectors to continuous embeddings used by edge/feature decoders.
+        Map (relaxed) count vectors to continuous embeddings used by edge/feature decoders.
+        Modes:
+          - "log1p_linear": Linear(log1p(z))
+          - "log1p":        log1p(z)
+          - "identity":     z
         """
-        h = z_counts.float()
-        if self.embed_log1p:
+        h = z_counts
+        if self.embed_mode in {"log1p_linear", "log1p"}:
             h = torch.log1p(h)
-        h = self.counts_proj(h)
+        if self.embed_mode == "log1p_linear":
+            h = self.embed_lin(h)
         return h
 
     # ---- edge branch ----
@@ -578,11 +634,9 @@ class RG_P_VAE(nn.Module):
         KL(Pois(λ_q) || Pois(λ_p)) summed over dims, averaged over nodes.
         λ_q: [N, D], λ_p: [D]
         """
-        # Broadcast λ_p to [N, D]
         lambda_p_b = lambda_p.view(1, -1).expand_as(lambda_q)
-        # Avoid log(0) via eps handled by caller
         kl_nd = lambda_q * (torch.log(lambda_q) - torch.log(lambda_p_b)) + lambda_p_b - lambda_q
-        return kl_nd.sum(dim=-1).mean()  # average over nodes
+        return kl_nd.sum(dim=-1).mean()
 
     # ---- ELBO ----
 
@@ -596,26 +650,17 @@ class RG_P_VAE(nn.Module):
         lambda_kl: float = 1e-3,
     ) -> Tuple[torch.Tensor, Dict[str, float]]:
         """
-        One-sample Monte Carlo ELBO with REINFORCE for encoder gradients.
+        One-sample Monte Carlo ELBO with *pathwise* gradients via Algorithm 1 rsample.
         """
-        # q(z|x): elementwise Poisson with rate λ_q
-        lambda_q = self.encode_posterior_rate(A_norm, feats)          # [N, D]
-        lambda_p = self.prior_rate()                                  # [D]
+        # q(z|x) rates and prior rates
+        lambda_q = self.encode_posterior_rate(A_norm, feats)  # [N, D]
+        lambda_p = self.prior_rate()                          # [D]
 
-        # Choose embedding either from a sample or from the mean
-        if self.use_mean_embed:
-            z_embed = self._to_embedding(lambda_q)                    # deterministic, biased
-            log_q_sum = None
-        else:
-            # Sample counts (no gradient path), then convert to embedding.
-            with torch.no_grad():
-                z_counts = torch.poisson(lambda_q)                    # [N, D], float
-            z_embed = self._to_embedding(z_counts)                    # [N, D]
-            # Log q(z|x): sum over dims & nodes (scalar)
-            log_q = torch.distributions.Poisson(lambda_q).log_prob(z_counts).sum(dim=-1)  # [N]
-            log_q_sum = log_q.sum()                                   # scalar
+        # Relaxed Poisson sample (differentiable w.r.t. encoder via Exponential.rsample)
+        z_relaxed = self.poisson_rsample(lambda_q)            # [N, D]
+        z_embed = self._to_embedding(z_relaxed)               # [N, D] or [N, embed_out_dim]
 
-        # ---- Reconstruction terms (decoders receive standard gradients) ----
+        # ---- Reconstruction terms ----
         # Edges: pos + neg pairs
         pairs = torch.cat([pos_pairs, neg_pairs], dim=0)
         labels = torch.cat(
@@ -641,26 +686,19 @@ class RG_P_VAE(nn.Module):
         # ---- Metabolic cost (optional): β * E_q[sum z] = β * sum λ_q ----
         metabolic = self.beta_metabolic * lambda_q.sum(dim=-1).mean() if self.beta_metabolic > 0 else torch.tensor(0.0, device=feats.device)
 
-        # ---- REINFORCE term for encoder (only when sampling is used) ----
-        if (not self.use_mean_embed) and (self.reinforce_weight != 0.0):
-            # We minimize loss, so gradient for encoder parameters is:
-            # ∇ E_q[recon_total] = E_q[recon_total ∇ log q]; implement with a scalar baseline.
-            reinforce = self.reinforce_weight * (recon_total.detach() - self.baseline) * log_q_sum
-        else:
-            reinforce = torch.tensor(0.0, device=feats.device)
-
         # ---- Total loss ----
-        loss = recon_total + lambda_kl * kl + metabolic + reinforce
+        loss = recon_total + lambda_kl * kl + metabolic
 
         stats = {
             "recon_edge": float(recon_edge.item()),
             "recon_feat": float(recon_feat.item()),
             "kl_poisson": float(kl.item()),
             "metabolic": float(metabolic.item()) if isinstance(metabolic, torch.Tensor) else float(metabolic),
-            "reinforce": float(reinforce.item()) if isinstance(reinforce, torch.Tensor) else float(reinforce),
             "decoder": self.decoder_name,
             "feat_likelihood": self.feat_likelihood_name,
-            "use_mean_embed": bool(self.use_mean_embed),
+            "embed_mode": self.embed_mode,
+            "n_exp": int(self.poisson_rsample.n_exp),
+            "temperature": float(self.poisson_rsample.temperature),
         }
         return loss, stats
 
@@ -668,9 +706,9 @@ class RG_P_VAE(nn.Module):
 
     def embed(self, A_norm: torch.Tensor, feats: Optional[torch.Tensor] = None, use_mean: bool = True) -> torch.Tensor:
         """
-        Returns a deterministic node embedding:
-          - If use_mean=True: uses λ_q (posterior mean counts).
-          - Else: draws a sample z~q and returns its embedding (no grad).
+        Returns node embedding (positions) for downstream use:
+          - If use_mean=True: uses λ_q as the count proxy (posterior mean); ϕ(λ_q).
+          - Else: draws a hard sample z~q via thresholding (no grad) and returns ϕ(z).
         """
         if feats is None:
             x = self.structural_features(A_norm) if self.use_struct_feats else torch.zeros(
@@ -679,9 +717,9 @@ class RG_P_VAE(nn.Module):
         else:
             x = self._compose_encoder_input(A_norm, feats)
 
-        lambda_q = self.encode_posterior_rate(A_norm, x)  # here 'x' is already composed
+        lambda_q = self.encode_posterior_rate(A_norm, x)
         if use_mean:
-            return self._to_embedding(lambda_q)
-        with torch.no_grad():
-            z_counts = torch.poisson(lambda_q)
-        return self._to_embedding(z_counts)
+            z_proxy = lambda_q
+        else:
+            z_proxy = self.poisson_rsample.hard_sample(lambda_q)
+        return self._to_embedding(z_proxy)

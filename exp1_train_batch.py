@@ -32,7 +32,7 @@ import numpy as np
 import torch
 import ot  # Python Optimal Transport (POT)
 
-from models.rg_vae import RG_VAE
+from models.rg_vae import RG_VAE, RG_P_VAE
 from models.utils import (
     load_graph_dir,
     build_sparse_adj,
@@ -88,18 +88,28 @@ def build_model(input_dim: int, args) -> RG_VAE:
             raise ValueError
     except Exception:
         raise SystemExit("--decoder_kwargs must be a JSON object string, e.g. '{\"num_features\":1024}'")
-    model = RG_VAE(
-        input_dim=input_dim,
-        latent_dim=args.latent_dim,
-        hidden=args.hidden,
-        enc_layers=2,
-        use_struct_feats=args.use_struct_feats,
-        decoder=args.decoder,
-        decoder_kwargs=dec_kwargs,
-        feat_dec_hidden=args.feat_dec_hidden,
-        feature_likelihood=args.feature_likelihood,
-        
-    )
+    if args.model=='RG-G-VAE':
+        model = RG_VAE(
+            input_dim=input_dim,
+            latent_dim=args.latent_dim,
+            hidden=args.hidden,
+            enc_layers=2,
+            use_struct_feats=args.use_struct_feats,
+            decoder=args.decoder,
+            decoder_kwargs=dec_kwargs,
+            feat_dec_hidden=args.feat_dec_hidden
+        )
+    elif args.model=='RG-P-VAE':
+        model = RG_P_VAE(
+            input_dim=input_dim,
+            latent_dim=args.latent_dim,
+            hidden=args.hidden,
+            enc_layers=2,
+            use_struct_feats=args.use_struct_feats,
+            decoder=args.decoder,
+            decoder_kwargs=dec_kwargs,
+            feat_dec_hidden=args.feat_dec_hidden
+        )
     return model
 
 def step_graph(model: RG_VAE,
@@ -242,6 +252,10 @@ def parse_args():
     ap.add_argument("--results_dir", default="results/")
 
     # model & training
+    ap.add_argument("--model", default="RG-G-VAE", choices=["RG-G-VAE", "RG-P-VAE"], help="Model to train")
+    ap.add_argument("--feature_likelihood", default="poisson", choices=["gaussian", "poisson"], help="Feature likelihood type")
+
+    # training
     ap.add_argument("--epochs", type=int, default=80)
     ap.add_argument("--lr", type=float, default=1e-3)
     ap.add_argument("--weight_decay", type=float, default=1e-4)
@@ -251,7 +265,7 @@ def parse_args():
     ap.add_argument("--split_seed", type=int, default=42)
     ap.add_argument("--val_frac", type=float, default=0.10)
     ap.add_argument("--test_frac", type=float, default=0.10)
-    ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
+    ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")    
 
     # decoder
     ap.add_argument("--decoder", default="radial", choices=["radial", "dot", "bilinear", "indefinite", "mlp", "dc_radial", "rff"])
