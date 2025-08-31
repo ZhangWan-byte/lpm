@@ -176,17 +176,63 @@ def load_true_positions(graph_dir: str) -> Optional[np.ndarray]:
     npz = np.load(os.path.join(graph_dir, files[0]))
     return np.array(npz["positions"], dtype=np.float32) if "positions" in npz.files else None
 
-def _posterior_sample_latents(model, A_norm: torch.Tensor, feats_t: torch.Tensor, seed: int = 0) -> np.ndarray:
-    """Draw one sample z ~ q_phi(z|x,A) via reparameterization using model.encode(...)."""
+# def _posterior_sample_latents(model, A_norm: torch.Tensor, feats_t: torch.Tensor, seed: int = 0) -> np.ndarray:
+#     """Draw one sample z ~ q_phi(z|x,A) via reparameterization using model.encode(...)."""
+#     torch.manual_seed(seed)
+#     try:
+#         mu, logvar = model.encode(A_norm, feats=feats_t)  # preferred signature
+#     except TypeError:
+#         mu, logvar = model.encode(A_norm)  # fallback if older signature
+#     std = torch.exp(0.5 * logvar)
+#     eps = torch.randn_like(std)
+#     z = mu + eps * std
+#     return z.detach().cpu().numpy()
+
+def _posterior_sample_latents(
+    model,
+    A_norm: torch.Tensor,
+    feats_t: torch.Tensor,
+    seed: int = 0,
+    model_name: str = "RG-G-VAE",
+) -> np.ndarray:
+    """
+    Draw one posterior sample of node-level latent *positions*, branching by `model_name`.
+
+    Args:
+        model: The instantiated model.
+        A_norm: [N,N] normalized sparse adjacency (torch.sparse_coo_tensor).
+        feats_t: [N,Dx] node feature tensor.
+        seed: RNG seed for reproducibility.
+        model_name: "RG-G-VAE" (Gaussian) or "RG-P-VAE" (Poisson-latent).
+
+    Returns:
+        np.ndarray of shape [N, D_embed] — the same representation the edge decoder consumes.
+    """
     torch.manual_seed(seed)
-    try:
-        mu, logvar = model.encode(A_norm, feats=feats_t)  # preferred signature
-    except TypeError:
-        mu, logvar = model.encode(A_norm)  # fallback if older signature
-    std = torch.exp(0.5 * logvar)
-    eps = torch.randn_like(std)
-    z = mu + eps * std
-    return z.detach().cpu().numpy()
+
+    if model_name == "RG-P-VAE":
+        # Poisson-latent branch: rsample relaxed counts and map to latent positions.
+        with torch.no_grad():
+            lambda_q = model.encode(A_norm, feats_t)        # [N, Dz]
+            z_relaxed = model.poisson_rsample(lambda_q)                    # [N, Dz]
+            z_embed = model._to_embedding(z_relaxed) if hasattr(model, "_to_embedding") else z_relaxed
+        return z_embed.detach().cpu().numpy()
+    
+    elif model_name == "RG-G-VAE":
+
+        # Default: Gaussian-latent branch (RG-G-VAE)
+        try:
+            mu, logvar = model.encode(A_norm, feats=feats_t)
+        except TypeError:
+            mu, logvar = model.encode(A_norm)
+        std = torch.exp(0.5 * logvar)
+        eps = torch.randn_like(std)
+        z = mu + eps * std
+        return z.detach().cpu().numpy()
+    
+    else:
+        raise ValueError(f"Unknown model name: {model_name}")
+
 
 def compute_gwd_ignr(model: "RG_VAE",
                      A_norm: torch.Tensor,
@@ -196,7 +242,8 @@ def compute_gwd_ignr(model: "RG_VAE",
                      num_samples: int = 5,
                      seed: int = 0,
                      max_iter: int = 200,
-                     tol: float = 1e-9) -> float:
+                     tol: float = 1e-9,
+                     model_name: str = "RG-G-VAE") -> float:
     """
     IGNR-style GWD^2: compare metric spaces (Z_true, Z_hat) using POT's ot.gromov_wasserstein2.
     - Z_true: ground-truth latent positions (numpy [N,d_true])
@@ -214,7 +261,7 @@ def compute_gwd_ignr(model: "RG_VAE",
 
     gws = []
     for s in range(num_samples):
-        Zs = _posterior_sample_latents(model, A_norm, feats_t, seed=seed + s)
+        Zs = _posterior_sample_latents(model, A_norm, feats_t, model_name=model_name, seed=seed + s)
         Zh = Zs[idx].astype(np.float64)
         Ch = _pairwise_euclidean(Zh)
         # POT non-entropic GW^2 with squared loss
@@ -441,6 +488,7 @@ def main():
                     max_nodes=args.gwd_nodes,
                     num_samples=args.gwd_samples,
                     seed=epoch,
+                    model_name=args.model
                 )
                 gwd_vals.append(g)
                 picked += 1
@@ -459,7 +507,7 @@ def main():
                 Z_true = load_true_positions(gdir)
                 if Z_true is None:
                     continue
-                Z_hat = _posterior_sample_latents(model, A_norm, feats_t, seed=epoch)
+                Z_hat = _posterior_sample_latents(model, A_norm, feats_t, model_name=args.model, seed=epoch)
                 idx = _subsample_indices(Z_true.shape[0], args.lp_nodes, seed=epoch)
                 rmse = procrustes_rmse(Z_true[idx], Z_hat[idx], center=True, scale=False)
                 lp_vals.append(rmse)
