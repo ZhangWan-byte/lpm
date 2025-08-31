@@ -67,8 +67,7 @@ def _emit_node_features(rng, Z: np.ndarray, blocks, node_feat_cfg) -> np.ndarray
     feats = []
     if poly:
         feats.append(Z)
-        feats.append(2 * Z**2)
-        feats.append((-1) * Z**5)
+        feats.append(Z**2)
         feats.append(3 * np.log(Z))
         feats.append(np.exp(Z))
 
