@@ -253,7 +253,7 @@ def parse_args():
 
     # model & training
     ap.add_argument("--model", default="RG-G-VAE", choices=["RG-G-VAE", "RG-P-VAE"], help="Model to train")
-    ap.add_argument("--feature_likelihood", default="poisson", choices=["gaussian", "poisson"], help="Feature likelihood type")
+    # ap.add_argument("--feature_likelihood", default="gaussian", choices=["gaussian", "poisson"], help="Feature likelihood type")
 
     # training
     ap.add_argument("--epochs", type=int, default=80)

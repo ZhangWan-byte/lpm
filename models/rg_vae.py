@@ -475,7 +475,7 @@ class RG_P_VAE(nn.Module):
         decoder: str = "radial",         # edge decoder name
         decoder_kwargs: Optional[dict] = None,
         feat_dec_hidden: int = 64,
-        feature_likelihood: str = "poisson",  # "gaussian" or "poisson"
+        feature_likelihood: str = "gaussian",  # "gaussian" or "poisson"
         poisson_full: bool = False,      # include Stirling term in Poisson NLL (usually False)
         prior_rate_init: float = 1.0,    # init for Poisson prior rates λ_p
         prior_learnable: bool = True,    # learn λ_p
@@ -692,7 +692,7 @@ class RG_P_VAE(nn.Module):
         stats = {
             "recon_edge": float(recon_edge.item()),
             "recon_feat": float(recon_feat.item()),
-            "kl_poisson": float(kl.item()),
+            "kl": float(kl.item()),
             "metabolic": float(metabolic.item()) if isinstance(metabolic, torch.Tensor) else float(metabolic),
             "decoder": self.decoder_name,
             "feat_likelihood": self.feat_likelihood_name,
