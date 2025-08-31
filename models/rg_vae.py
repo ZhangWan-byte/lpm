@@ -579,7 +579,7 @@ class RG_P_VAE(nn.Module):
 
     # ---- Poisson posterior / prior ----
 
-    def encode_posterior_rate(self, A_norm: torch.Tensor, feats: torch.Tensor) -> torch.Tensor:
+    def encode(self, A_norm: torch.Tensor, feats: torch.Tensor) -> torch.Tensor:
         """
         Returns elementwise posterior rates λ_q(x) (shape: [N, D]).
         We interpret the encoder's 'mu' output as pre-activation for rate; softplus→positive.
@@ -653,7 +653,7 @@ class RG_P_VAE(nn.Module):
         One-sample Monte Carlo ELBO with *pathwise* gradients via Algorithm 1 rsample.
         """
         # q(z|x) rates and prior rates
-        lambda_q = self.encode_posterior_rate(A_norm, feats)  # [N, D]
+        lambda_q = self.encode(A_norm, feats)  # [N, D]
         lambda_p = self.prior_rate()                          # [D]
 
         # Relaxed Poisson sample (differentiable w.r.t. encoder via Exponential.rsample)
@@ -717,7 +717,7 @@ class RG_P_VAE(nn.Module):
         else:
             x = self._compose_encoder_input(A_norm, feats)
 
-        lambda_q = self.encode_posterior_rate(A_norm, x)
+        lambda_q = self.encode(A_norm, x)
         if use_mean:
             z_proxy = lambda_q
         else:
