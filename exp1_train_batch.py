@@ -286,7 +286,7 @@ def main():
 
     # Create results directory with timestamp
     stamp = datetime.now().strftime("%m%d_%H%M")
-    results_root = os.path.join(args.results_dir, stamp+"_"+args.setting_dir[-2:])
+    results_root = os.path.join(args.results_dir, stamp+"_"+os.path.basename(os.path.normpath(args.setting_dir)))
     os.makedirs(results_root, exist_ok=True)
 
     # Save full command line
