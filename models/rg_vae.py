@@ -366,11 +366,6 @@ class RG_VAE(nn.Module):
             return pos.mean()
         return 0.5 * (pos.mean() + neg.mean())
 
-    @staticmethod
-    def gaussian_mse_loss(x_hat: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
-        # Fixed unit-variance Gaussian => MSE/2 up to constant; we use mean MSE for scale stability
-        return F.mse_loss(x_hat, x)
-
     # ----- ELBO with two branches -----
     def elbo(
         self,
@@ -683,10 +678,6 @@ class RG_P_VAE(nn.Module):
     # ---- losses ----
 
     @staticmethod
-    def gaussian_mse_loss(x_hat: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
-        return F.mse_loss(x_hat, x)
-
-    @staticmethod
     def poisson_nll_from_log_rate(log_rate: torch.Tensor, x: torch.Tensor, full: bool = False) -> torch.Tensor:
         if torch.any(x < 0):
             raise ValueError("Poisson decoder received negative target counts.")
@@ -809,21 +800,10 @@ class RG_P_VAE(nn.Module):
             "recon_edge": float(L_edge.item()),
             "recon_feat": float(L_feat.item()),
             "kl": float(L_kl.item()),
-            "w_edge": float(w_edge.item()),
-            "w_feat": float(w_feat.item()),
-            "decoder": getattr(self, "decoder_name", "unknown"),
-        }
-        return loss, stats
-
-        stats = {
-            "recon_edge": float(recon_edge.item()),
-            "recon_feat": float(recon_feat.item()),
-            "kl": float(kl.item()),
             "metabolic": float(metabolic.item()) if isinstance(metabolic, torch.Tensor) else float(metabolic),
             "w_edge": float(w_edge.item()),
             "w_feat": float(w_feat.item()),
             "decoder": self.decoder_name,
-            "feat_likelihood": self.feat_likelihood_name,
             "embed_mode": self.embed_mode,
             "n_exp": int(self.poisson_rsample.n_exp),
             "temperature": float(self.poisson_rsample.temperature),
