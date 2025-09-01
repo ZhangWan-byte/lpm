@@ -189,6 +189,30 @@ def plot_geometry(ax, epochs, gwd2, lp_rmse, run_label="", colors=None, smooth=F
             ax.plot(epochs[mask], y_plot[mask], color=c_light, linestyle="--", label=f"{run_label} LP-RMSE")
     ax.set_title("Geometry metrics (val)"); ax.set_xlabel("epoch"); ax.set_ylabel("value"); ax.grid(True)
 
+def plot_geometry_split(ax_gwd, ax_lp, epochs, gwd2, lp_rmse, run_label="", colors=None, smooth=False):
+    c_base  = colors[run_label]["base"]  if colors else None
+    c_light = colors[run_label]["light"] if colors else None
+
+    # --- GWD^2 ---
+    if gwd2 is not None:
+        y = np.array(gwd2, dtype=float)
+        mask = ~np.isnan(y)
+        if mask.any():
+            y_plot = ema(y) if smooth else y
+            ax_gwd.plot(epochs[mask], y_plot[mask], color=c_base, label=f"{run_label} GWD$^2$")
+
+    # --- LP-RMSE ---
+    if lp_rmse is not None:
+        y = np.array(lp_rmse, dtype=float)
+        mask = ~np.isnan(y)
+        if mask.any():
+            y_plot = ema(y) if smooth else y
+            ax_lp.plot(epochs[mask], y_plot[mask], color=(c_light or c_base), linestyle="--",
+                       label=f"{run_label} LP-RMSE")
+
+    ax_gwd.set_title("GWD$^2$ (val)"); ax_gwd.set_xlabel("epoch"); ax_gwd.set_ylabel("value"); ax_gwd.grid(True)
+    ax_lp.set_title("LP-RMSE (val)");  ax_lp.set_xlabel("epoch");  ax_lp.set_ylabel("value");  ax_lp.grid(True)
+
 # ---------- main ----------
 def main():
     ap = argparse.ArgumentParser()
@@ -249,14 +273,29 @@ def main():
     fig2.suptitle("RG-VAE Training — Link Prediction (val)")
     fig2.tight_layout(rect=[0, 0.03, 1, 0.97])
 
-    # ---- PLOTS: Geometry (GWD^2, LP-RMSE)
-    fig3, ax3 = plt.subplots(1, 1, figsize=(10, 5))
+    # # ---- PLOTS: Geometry (GWD^2, LP-RMSE)
+    # fig3, ax3 = plt.subplots(1, 1, figsize=(10, 5))
+    # for (rdir, m) in loaded:
+    #     lbl = os.path.basename(os.path.normpath(rdir))
+    #     plot_geometry(ax3, m["epochs"], m["gwd2"], m["lp_rmse"], run_label=lbl, colors=colors, smooth=args.smooth)
+    # ax3.legend(ncol=2, fontsize=9)
+    # fig3.suptitle("RG-VAE Training — Geometry Metrics (val)")
+    # fig3.tight_layout(rect=[0, 0.03, 1, 0.97])
+
+    # ---- PLOTS: Geometry (GWD^2, LP-RMSE) in two sub-figures
+    fig3, (ax3_gwd, ax3_lp) = plt.subplots(1, 2, figsize=(12, 5))
     for (rdir, m) in loaded:
         lbl = os.path.basename(os.path.normpath(rdir))
-        plot_geometry(ax3, m["epochs"], m["gwd2"], m["lp_rmse"], run_label=lbl, colors=colors, smooth=args.smooth)
-    ax3.legend(ncol=2, fontsize=9)
+        plot_geometry_split(ax3_gwd, ax3_lp,
+                            m["epochs"], m["gwd2"], m["lp_rmse"],
+                            run_label=lbl, colors=colors, smooth=args.smooth)
+
+    for ax in (ax3_gwd, ax3_lp):
+        ax.legend(ncol=2, fontsize=9)
+
     fig3.suptitle("RG-VAE Training — Geometry Metrics (val)")
     fig3.tight_layout(rect=[0, 0.03, 1, 0.97])
+
 
     # ---- Save figures
     losses_png   = os.path.join(out_dir, "losses.png")

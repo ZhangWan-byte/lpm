@@ -269,6 +269,10 @@ class RG_VAE(nn.Module):
         # Feature decoder (Gaussian)
         self.feature_decoder = FeatureDecoderGaussian(latent_dim=latent_dim, x_dim=input_dim, hidden=feat_dec_hidden)
 
+        # --- uncertainty weighting scalars (Kendall & Gal) ---
+        self.s_edge = torch.nn.Parameter(torch.zeros(()))  # log variance for edge task
+        self.s_feat = torch.nn.Parameter(torch.zeros(()))  # log variance for feature task
+
     @staticmethod
     def _make_edge_decoder(name: str, latent_dim: int, kwargs: dict) -> nn.Module:
         if name == "radial":
@@ -335,48 +339,111 @@ class RG_VAE(nn.Module):
         # KL(q||p) for standard normal prior
         return 0.5 * torch.sum(torch.exp(logvar) + mu**2 - 1.0 - logvar)
 
+    def _bce_weighted_renorm(self,
+                            logits: torch.Tensor,
+                            labels: torch.Tensor,
+                            pos_weight: float) -> torch.Tensor:
+        """
+        Ratio-invariant BCE for 1:K negative sampling.
+        This is equivalent to BCEWithLogitsLoss(pos_weight=K) but renormalized
+        by sum of weights so the magnitude is comparable across splits.
+        """
+        per_ex = F.binary_cross_entropy_with_logits(logits, labels.float(), reduction="none")
+        w_pos  = torch.as_tensor(pos_weight, device=logits.device, dtype=per_ex.dtype)
+        w      = torch.where(labels > 0.5, w_pos, torch.tensor(1.0, device=logits.device, dtype=per_ex.dtype))
+        return (w * per_ex).sum() / w.sum()
+
+
+    def _bce_class_mean(self, logits: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
+        """Per-class mean: 0.5*mean_pos + 0.5*mean_neg (also ratio-invariant)."""
+        per_ex = F.binary_cross_entropy_with_logits(logits, labels.float(), reduction="none")
+        pos = per_ex[labels == 1]
+        neg = per_ex[labels == 0]
+        # handle edge cases if a batch is all-pos or all-neg
+        if pos.numel() == 0:
+            return neg.mean()
+        if neg.numel() == 0:
+            return pos.mean()
+        return 0.5 * (pos.mean() + neg.mean())
+
     @staticmethod
     def gaussian_mse_loss(x_hat: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
         # Fixed unit-variance Gaussian => MSE/2 up to constant; we use mean MSE for scale stability
         return F.mse_loss(x_hat, x)
 
     # ----- ELBO with two branches -----
-
     def elbo(
         self,
         A_norm: torch.Tensor,
         pos_pairs: torch.Tensor,
         neg_pairs: torch.Tensor,
-        feats: torch.Tensor,            # observed node features x
-        lambda_feat: float = 1.0,
+        feats: torch.Tensor,                 # observed node features x
+        lambda_feat: float = 1.0,            # used only when task_weighting='fixed'
         lambda_kl: float = 1e-3,
+        edge_weighting: str = "weighted_renorm",  # or 'class_mean'
+        task_weighting: str = "uncertainty",      # or 'fixed'
     ) -> Tuple[torch.Tensor, Dict[str, float]]:
+
+        # Encode / sample
         mu, logvar = self.encode(A_norm, feats)
         z = self.reparameterize(mu, logvar)
 
-        # Edge reconstruction on pos+neg pairs
-        pairs = torch.cat([pos_pairs, neg_pairs], dim=0)
-        labels = torch.cat(
-            [torch.ones(pos_pairs.size(0), device=z.device),
-             torch.zeros(neg_pairs.size(0), device=z.device)]
-        )
+        # ----- EDGE RECON (pos + neg) -----
+        pairs  = torch.cat([pos_pairs, neg_pairs], dim=0)
+        labels = torch.cat([
+            torch.ones(pos_pairs.size(0), device=z.device),
+            torch.zeros(neg_pairs.size(0), device=z.device)
+        ], dim=0)
         logits = self.pair_logits(z, pairs)
-        recon_edge = bce_logits(logits, labels, pos_weight=torch.tensor(len(neg_pairs)/len(pos_pairs), device=labels.device))
 
-        # Feature reconstruction
+        if edge_weighting == "weighted_renorm":
+            r = max(1.0, float(neg_pairs.size(0)) / max(1, pos_pairs.size(0)))
+            L_edge = self._bce_weighted_renorm(logits, labels, pos_weight=r)
+        elif edge_weighting == "class_mean":
+            L_edge = self._bce_class_mean(logits, labels)
+        else:
+            raise ValueError(f"Unknown edge_weighting: {edge_weighting}")
+
+        # ----- FEATURE RECON (standardized MSE) -----
         x_hat = self.feature_decoder(z)
-        recon_feat = self.gaussian_mse_loss(x_hat, feats)
+        L_feat = F.mse_loss(x_hat, feats)
 
-        # KL
-        kl = self.kl_normal(mu, logvar) / mu.size(0)  # average per node
+        # ----- KL (mean per node) -----
+        L_kl = self.kl_normal(mu, logvar) / mu.size(0)
 
-        # Total
-        loss = recon_edge + lambda_feat * recon_feat + lambda_kl * kl
+        # ----- TASK WEIGHTING -----
+        if task_weighting == "uncertainty":
+            # Kendall & Gal (learn s_edge, s_feat)
+            w_edge = torch.exp(-self.s_edge)
+            w_feat = torch.exp(-self.s_feat)
+
+            # (Optional stability) renormalize so w_edge + w_feat ≈ 2
+            # with torch.no_grad():
+            #     scale = 2.0 / (w_edge + w_feat).clamp_min(1e-6)
+            # w_edge, w_feat = w_edge*scale, w_feat*scale
+
+            w_edge = w_edge.clamp(0.1, 10.0)
+            w_feat = w_feat.clamp(0.1, 10.0)
+
+            loss = w_edge * L_edge + self.s_edge + w_feat * L_feat + self.s_feat + lambda_kl * L_kl
+
+        elif task_weighting == "fixed":
+            
+            loss = L_edge + lambda_feat * L_feat + lambda_kl * L_kl
+
+            w_edge = torch.tensor(1.0, device=z.device)
+            w_feat = torch.tensor(lambda_feat, device=z.device)
+        
+        else:
+            raise ValueError(f"Unknown task_weighting: {task_weighting}")
+
         stats = {
-            "recon_edge": float(recon_edge.item()),
-            "recon_feat": float(recon_feat.item()),
-            "kl": float(kl.item()),
-            "decoder": self.decoder_name,
+            "recon_edge": float(L_edge.item()),
+            "recon_feat": float(L_feat.item()),
+            "kl": float(L_kl.item()),
+            "w_edge": float(w_edge.item()),
+            "w_feat": float(w_feat.item()),
+            "decoder": getattr(self, "decoder_name", "unknown"),
         }
         return loss, stats
 
@@ -475,7 +542,6 @@ class RG_P_VAE(nn.Module):
         decoder: str = "radial",         # edge decoder name
         decoder_kwargs: Optional[dict] = None,
         feat_dec_hidden: int = 64,
-        feature_likelihood: str = "gaussian",  # "gaussian" or "poisson"
         poisson_full: bool = False,      # include Stirling term in Poisson NLL (usually False)
         prior_rate_init: float = 1.0,    # init for Poisson prior rates λ_p
         prior_learnable: bool = True,    # learn λ_p
@@ -508,16 +574,10 @@ class RG_P_VAE(nn.Module):
         self.decoder_name = (decoder or "radial").lower()
         self.decoder = self._make_edge_decoder(self.decoder_name, latent_dim if embed_out_dim is None else embed_out_dim, (decoder_kwargs or {}))
 
-        # Feature decoder (Gaussian or Poisson) — consumes the same embedding as the edge decoder
-        self.feat_likelihood_name = (feature_likelihood or "gaussian").lower()
+        # Feature decoder — consumes the same embedding as the edge decoder
         feat_in_dim = latent_dim if embed_out_dim is None else embed_out_dim
-        if self.feat_likelihood_name == "gaussian":
-            self.feature_decoder = FeatureDecoderGaussian(latent_dim=feat_in_dim, x_dim=input_dim, hidden=feat_dec_hidden)
-        elif self.feat_likelihood_name == "poisson":
-            self.feature_decoder = FeatureDecoderPoisson(latent_dim=feat_in_dim, x_dim=input_dim, hidden=feat_dec_hidden)
-        else:
-            raise ValueError(f"Unknown feature_likelihood '{feature_likelihood}'. Use 'gaussian' or 'poisson'.")
-
+        self.feature_decoder = FeatureDecoderGaussian(latent_dim=feat_in_dim, x_dim=input_dim, hidden=feat_dec_hidden)
+        
         # rsample module
         self.poisson_rsample = PoissonRsample(n_exp=n_exp, temperature=temperature)
 
@@ -532,6 +592,10 @@ class RG_P_VAE(nn.Module):
         elif self.embed_out_dim is not None:
             # identity/log1p but changing dimensionality is unsupported
             raise ValueError("embed_out_dim can only be set with embed_mode='log1p_linear'.")
+        
+        # --- uncertainty weighting scalars (Kendall & Gal) ---
+        self.s_edge = torch.nn.Parameter(torch.zeros(()))  # log variance for edge task
+        self.s_feat = torch.nn.Parameter(torch.zeros(()))  # log variance for feature task
 
     # ---- utilities ----
 
@@ -637,6 +701,32 @@ class RG_P_VAE(nn.Module):
         lambda_p_b = lambda_p.view(1, -1).expand_as(lambda_q)
         kl_nd = lambda_q * (torch.log(lambda_q) - torch.log(lambda_p_b)) + lambda_p_b - lambda_q
         return kl_nd.sum(dim=-1).mean()
+    
+    def _bce_weighted_renorm(self,
+                            logits: torch.Tensor,
+                            labels: torch.Tensor,
+                            pos_weight: float) -> torch.Tensor:
+        """
+        Ratio-invariant BCE for 1:K negative sampling.
+        This is equivalent to BCEWithLogitsLoss(pos_weight=K) but renormalized
+        by sum of weights so the magnitude is comparable across splits.
+        """
+        per_ex = F.binary_cross_entropy_with_logits(logits, labels.float(), reduction="none")
+        w_pos  = torch.as_tensor(pos_weight, device=logits.device, dtype=per_ex.dtype)
+        w      = torch.where(labels > 0.5, w_pos, torch.tensor(1.0, device=logits.device, dtype=per_ex.dtype))
+        return (w * per_ex).sum() / w.sum()
+
+    def _bce_class_mean(self, logits: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
+        """Per-class mean: 0.5*mean_pos + 0.5*mean_neg (also ratio-invariant)."""
+        per_ex = F.binary_cross_entropy_with_logits(logits, labels.float(), reduction="none")
+        pos = per_ex[labels == 1]
+        neg = per_ex[labels == 0]
+        # handle edge cases if a batch is all-pos or all-neg
+        if pos.numel() == 0:
+            return neg.mean()
+        if neg.numel() == 0:
+            return pos.mean()
+        return 0.5 * (pos.mean() + neg.mean())
 
     # ---- ELBO ----
 
@@ -648,6 +738,8 @@ class RG_P_VAE(nn.Module):
         feats: torch.Tensor,              # observed node features x
         lambda_feat: float = 1.0,
         lambda_kl: float = 1e-3,
+        edge_weighting: str = "weighted_renorm",  # or 'class_mean'
+        task_weighting: str = "uncertainty",      # or 'fixed'
     ) -> Tuple[torch.Tensor, Dict[str, float]]:
         """
         One-sample Monte Carlo ELBO with *pathwise* gradients via Algorithm 1 rsample.
@@ -668,32 +760,68 @@ class RG_P_VAE(nn.Module):
              torch.zeros(neg_pairs.size(0), device=z_embed.device)]
         )
         logits = self.pair_logits(z_embed, pairs)
-        recon_edge = bce_logits(logits, labels, pos_weight=torch.tensor(len(neg_pairs)/len(pos_pairs), device=labels.device))
 
-        # Node features:
-        if self.feat_likelihood_name == "gaussian":
-            x_hat = self.feature_decoder(z_embed)
-            recon_feat = self.gaussian_mse_loss(x_hat, feats)
+        if edge_weighting == "weighted_renorm":
+            r = max(1.0, float(neg_pairs.size(0)) / max(1, pos_pairs.size(0)))
+            L_edge = self._bce_weighted_renorm(logits, labels, pos_weight=r)
+        elif edge_weighting == "class_mean":
+            L_edge = self._bce_class_mean(logits, labels)
         else:
-            log_rate_x = self.feature_decoder(z_embed)
-            recon_feat = self.poisson_nll_from_log_rate(log_rate_x, feats, full=self.poisson_full)
+            raise ValueError(f"Unknown edge_weighting: {edge_weighting}")
 
-        recon_total = recon_edge + lambda_feat * recon_feat
+        # ----- FEATURE RECON (standardized MSE) -----
+        x_hat = self.feature_decoder(z_embed)
+        L_feat = F.mse_loss(x_hat, feats)
 
-        # ---- KL(q||p) for Poisson latents (closed-form) ----
-        kl = self.kl_poisson(lambda_q, lambda_p)
+        # ----- Poisson (mean per node) -----
+        L_kl = self.kl_poisson(lambda_q, lambda_p) / lambda_q.size(0)
 
         # ---- Metabolic cost (optional): β * E_q[sum z] = β * sum λ_q ----
         metabolic = self.beta_metabolic * lambda_q.sum(dim=-1).mean() if self.beta_metabolic > 0 else torch.tensor(0.0, device=feats.device)
 
-        # ---- Total loss ----
-        loss = recon_total + lambda_kl * kl + metabolic
+        # ----- TASK WEIGHTING -----
+        if task_weighting == "uncertainty":
+            # Kendall & Gal (learn s_edge, s_feat)
+            w_edge = torch.exp(-self.s_edge)
+            w_feat = torch.exp(-self.s_feat)
+
+            # (Optional stability) renormalize so w_edge + w_feat ≈ 2
+            # with torch.no_grad():
+            #     scale = 2.0 / (w_edge + w_feat).clamp_min(1e-6)
+            # w_edge, w_feat = w_edge*scale, w_feat*scale
+
+            w_edge = w_edge.clamp(0.1, 10.0)
+            w_feat = w_feat.clamp(0.1, 10.0)
+
+            loss = w_edge * L_edge + self.s_edge + w_feat * L_feat + self.s_feat + lambda_kl * L_kl + metabolic
+
+        elif task_weighting == "fixed":
+
+            loss = L_edge + lambda_feat * L_feat + lambda_kl * L_kl + metabolic
+
+            w_edge = torch.tensor(1.0, device=z.device)
+            w_feat = torch.tensor(lambda_feat, device=z.device)
+        
+        else:
+            raise ValueError(f"Unknown task_weighting: {task_weighting}")
+
+        stats = {
+            "recon_edge": float(L_edge.item()),
+            "recon_feat": float(L_feat.item()),
+            "kl": float(L_kl.item()),
+            "w_edge": float(w_edge.item()),
+            "w_feat": float(w_feat.item()),
+            "decoder": getattr(self, "decoder_name", "unknown"),
+        }
+        return loss, stats
 
         stats = {
             "recon_edge": float(recon_edge.item()),
             "recon_feat": float(recon_feat.item()),
             "kl": float(kl.item()),
             "metabolic": float(metabolic.item()) if isinstance(metabolic, torch.Tensor) else float(metabolic),
+            "w_edge": float(w_edge.item()),
+            "w_feat": float(w_feat.item()),
             "decoder": self.decoder_name,
             "feat_likelihood": self.feat_likelihood_name,
             "embed_mode": self.embed_mode,

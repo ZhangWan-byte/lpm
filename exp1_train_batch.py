@@ -121,14 +121,19 @@ def step_graph(model: RG_VAE,
                exclude_pairs: Optional[set],
                device: torch.device,
                lambda_feat: float,
-               lambda_kl: float) -> Tuple[torch.Tensor, Dict[str, float]]:
+               lambda_kl: float,
+               edge_weighting: str,
+               task_weighting: str) -> Tuple[torch.Tensor, Dict[str, float]]:
     n_pos = pos_edges.shape[0]
     neg_edges = negative_sampling(
         A_norm.size(0), max(1, n_pos * neg_ratio), exclude=exclude_pairs, undirected=undirected, device=device
     )
     pos = torch.from_numpy(pos_edges).long().to(device)
     neg = torch.from_numpy(neg_edges).long().to(device)
-    loss, stats = model.elbo(A_norm, pos, neg, feats=feats_t, lambda_feat=lambda_feat, lambda_kl=lambda_kl)
+    loss, stats = model.elbo(
+        A_norm, pos, neg, feats=feats_t, lambda_feat=lambda_feat, lambda_kl=lambda_kl, 
+        edge_weighting=edge_weighting, task_weighting=task_weighting
+    )
     return loss, stats
 
 def val_metrics(model: RG_VAE,
@@ -308,6 +313,9 @@ def parse_args():
     ap.add_argument("--latent_dim", type=int, default=16)
     ap.add_argument("--hidden", type=int, default=128)
     ap.add_argument("--neg_ratio", type=int, default=10)
+    ap.add_argument("--edge_weighting", default="weighted_renorm", choices=["weighted_renorm", 'class_mean'], help="Edge reconstruction loss weight")
+    ap.add_argument("--task_weighting", default="uncertainty", choices=["uncertainty", "fixed"], help="Node feature reconstruction loss weight")
+
     ap.add_argument("--split_seed", type=int, default=42)
     ap.add_argument("--val_frac", type=float, default=0.10)
     ap.add_argument("--test_frac", type=float, default=0.10)
@@ -406,6 +414,8 @@ def main():
     va_total_hist, va_edge_hist, va_feat_hist, va_kl_hist = [], [], [], []
     va_auc_hist, va_ap_hist = [], []
     gwd_hist, lprmse_hist = [], []
+    tr_wedges_hist, tr_wfeats_hist = [], []
+    va_wedges_hist, va_wfeats_hist = [], []
 
     best_val_total = float("inf")
     best_epoch = -1
@@ -416,11 +426,13 @@ def main():
 
         model.train()
         tr_totals = tr_edges = tr_feats = tr_kls = 0.0
+        tr_wedges = tr_wfeats = 0.0
 
         for (_, _, _, undirected, A_norm, feats_t, tr, _, exclude) in tqdm(loaded, desc=f"Epoch {epoch:03d}", ncols=80, file=sys.stdout):
             loss, stats = step_graph(
                 model, A_norm, feats_t, tr, args.neg_ratio, undirected, exclude, device,
-                lambda_feat=args.lambda_feat, lambda_kl=lam_kl
+                lambda_feat=args.lambda_feat, lambda_kl=lam_kl, 
+                edge_weighting=args.edge_weighting, task_weighting=args.task_weighting
             )
             opt.zero_grad()
             loss.backward()
@@ -430,22 +442,28 @@ def main():
             tr_edges  += stats["recon_edge"]
             tr_feats  += stats["recon_feat"]
             tr_kls    += stats["kl"]
+            tr_wedges += stats["w_edge"]
+            tr_wfeats += stats["w_feat"]
 
         # Validation (loss-like eval + AUC/AP)
         model.eval()
         va_totals = va_edges = va_feats = va_kls = 0.0
+        va_wedges = va_wfeats = 0.0
         va_aucs: List[float] = []
         va_aps:  List[float] = []
         with torch.no_grad():
             for (_, _, _, undirected, A_norm, feats_t, _, va, exclude) in loaded:
                 loss, stats = step_graph(
                     model, A_norm, feats_t, va, args.neg_ratio, undirected, exclude, device,
-                    lambda_feat=args.lambda_feat, lambda_kl=lam_kl
+                    lambda_feat=args.lambda_feat, lambda_kl=lam_kl, 
+                    edge_weighting=args.edge_weighting, task_weighting=args.task_weighting
                 )
                 va_totals += float(loss.item())
                 va_edges  += stats["recon_edge"]
                 va_feats  += stats["recon_feat"]
                 va_kls    += stats["kl"]
+                va_wedges += stats["w_edge"]
+                va_wfeats += stats["w_feat"]
 
                 auc, ap = val_metrics(
                     model, A_norm, feats_t, va, undirected, exclude, device, neg_ratio_for_auc=args.val_auc_neg_ratio
@@ -468,6 +486,10 @@ def main():
         tr_total_hist.append(tr_total); tr_edge_hist.append(tr_edge); tr_feat_hist.append(tr_feat); tr_kl_hist.append(tr_kl)
         va_total_hist.append(va_total); va_edge_hist.append(va_edge); va_feat_hist.append(va_feat); va_kl_hist.append(va_kl)
         va_auc_hist.append(va_auc); va_ap_hist.append(va_ap)
+
+        # Weight histories
+        tr_wedges_hist.append(tr_wedges / nG); tr_wfeats_hist.append(tr_wfeats / nG)
+        va_wedges_hist.append(va_wedges / nG); va_wfeats_hist.append(va_wfeats / nG)
 
         # Periodic IGNR-style GWD & LP-RMSE on validation graphs
         gwd_mean = np.nan
@@ -534,12 +556,16 @@ def main():
             tr_edge=np.array(tr_edge_hist, dtype=np.float32),
             tr_feat=np.array(tr_feat_hist, dtype=np.float32),
             tr_kl=np.array(tr_kl_hist, dtype=np.float32),
+            tr_wedges=np.array(tr_wedges_hist, dtype=np.float32),
+            tr_wfeats=np.array(tr_wfeats_hist, dtype=np.float32),
             va_total=np.array(va_total_hist, dtype=np.float32),
             va_edge=np.array(va_edge_hist, dtype=np.float32),
             va_feat=np.array(va_feat_hist, dtype=np.float32),
             va_kl=np.array(va_kl_hist, dtype=np.float32),
             va_auc=np.array(va_auc_hist, dtype=np.float32),
             va_ap=np.array(va_ap_hist, dtype=np.float32),
+            va_wedges=np.array(va_wedges_hist, dtype=np.float32),
+            va_wfeats=np.array(va_wfeats_hist, dtype=np.float32),
             gwd2=np.array(gwd_hist, dtype=np.float64),
             lp_rmse=np.array(lprmse_hist, dtype=np.float64),
             epochs=np.arange(1, len(tr_total_hist) + 1, dtype=np.int32),
