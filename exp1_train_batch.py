@@ -300,7 +300,6 @@ def parse_args():
 
     # model & training
     ap.add_argument("--model", default="RG-G-VAE", choices=["RG-G-VAE", "RG-P-VAE"], help="Model to train")
-    # ap.add_argument("--feature_likelihood", default="gaussian", choices=["gaussian", "poisson"], help="Feature likelihood type")
 
     # training
     ap.add_argument("--epochs", type=int, default=80)
@@ -317,10 +316,10 @@ def parse_args():
     # decoder
     ap.add_argument("--decoder", default="radial", choices=["radial", "dot", "bilinear", "indefinite", "mlp", "dc_radial", "rff"])
     ap.add_argument("--decoder_kwargs", default="{}", help='JSON dict for decoder (e.g., \'{"num_features":1024,"lengthscale":1.2,"ard":true}\')')
+    ap.add_argument("--feat_dec_hidden", type=int, default=64)
 
     # feature & loss
     ap.add_argument("--use_struct_feats", action="store_true")
-    ap.add_argument("--feat_dec_hidden", type=int, default=64)
     ap.add_argument("--lambda_feat", type=float, default=1.0)
     ap.add_argument("--lambda_kl", type=float, default=5e-3)
     ap.add_argument("--kl_warmup_epochs", type=int, default=50)
