@@ -361,7 +361,7 @@ class RG_VAE(nn.Module):
              torch.zeros(neg_pairs.size(0), device=z.device)]
         )
         logits = self.pair_logits(z, pairs)
-        recon_edge = bce_logits(logits, labels)
+        recon_edge = bce_logits(logits, labels, pos_weight=torch.tensor(len(neg_pairs)/len(pos_pairs), device=labels.device))
 
         # Feature reconstruction
         x_hat = self.feature_decoder(z)
@@ -668,7 +668,7 @@ class RG_P_VAE(nn.Module):
              torch.zeros(neg_pairs.size(0), device=z_embed.device)]
         )
         logits = self.pair_logits(z_embed, pairs)
-        recon_edge = bce_logits(logits, labels)
+        recon_edge = bce_logits(logits, labels, pos_weight=torch.tensor(len(neg_pairs)/len(pos_pairs), device=labels.device))
 
         # Node features:
         if self.feat_likelihood_name == "gaussian":

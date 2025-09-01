@@ -224,9 +224,8 @@ def negative_sampling(
     return out.astype(int)
 
 
-def bce_logits(logits: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
-    return torch.nn.functional.binary_cross_entropy_with_logits(logits, labels)
-
+def bce_logits(logits: torch.Tensor, labels: torch.Tensor, pos_weight: torch.Tensor) -> torch.Tensor:
+    return torch.nn.functional.binary_cross_entropy_with_logits(logits, labels, pos_weight=pos_weight)
 
 def auc_ap(scores: np.ndarray, labels: np.ndarray) -> Tuple[float, float]:
     # AUC via rank statistic (Mann–Whitney U)

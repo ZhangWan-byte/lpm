@@ -170,7 +170,7 @@ def plot_auc_ap(ax, epochs, auc, ap, run_label="", colors=None, smooth=False):
         auc, ap = ema(auc), ema(ap)
     ax.plot(epochs, auc, color=c_base, label=f"{run_label} AUC")
     ax.plot(epochs, ap,  color=c_light, linestyle="--", label=f"{run_label} AP")
-    ax.set_title("Link prediction (val)"); ax.set_xlabel("epoch"); ax.set_ylabel("score"); ax.grid(True)
+    ax.set_title("Link prediction (val) - pos:neg=1:1"); ax.set_xlabel("epoch"); ax.set_ylabel("score"); ax.grid(True)
 
 def plot_geometry(ax, epochs, gwd2, lp_rmse, run_label="", colors=None, smooth=False):
     c_base = colors[run_label]["base"] if colors else None
