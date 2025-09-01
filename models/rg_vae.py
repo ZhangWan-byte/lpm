@@ -790,9 +790,9 @@ class RG_P_VAE(nn.Module):
 
             loss = L_edge + lambda_feat * L_feat + lambda_kl * L_kl + metabolic
 
-            w_edge = torch.tensor(1.0, device=z.device)
-            w_feat = torch.tensor(lambda_feat, device=z.device)
-        
+            w_edge = torch.tensor(1.0, device=z_embed.device)
+            w_feat = torch.tensor(lambda_feat, device=z_embed.device)
+
         else:
             raise ValueError(f"Unknown task_weighting: {task_weighting}")
 
