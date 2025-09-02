@@ -36,7 +36,7 @@ python exp1_train_batch.py --setting_dir sim_data_batch/A1 --results_dir results
 ```
 
 ```bash
-python exp1_train_batch.py --setting_dir sim_data_batch/A1_poly_feats --model RG-G-VAE --results_dir results --epochs 2000 --latent_dim 2 --hidden 128 --decoder rff --decoder_kwargs '{"num_features":1024,"lengthscale":1.2,"ard":true,"learn_lengthscale":true"learn_omegas":false,"seed":0}' --feat_dec_hidden 128 --neg_ratio 20 --lambda_feat 1.0 --lambda_kl 0.005 --kl_warmup_epochs 100 --val_auc_neg_ratio 1 --lr 1e-4 --edge_weighting none --task_weighting fixed
+python exp1_train_batch.py --setting_dir sim_data_batch/A1_poly_feats --model RG-G-VAE --results_dir results --epochs 2000 --latent_dim 2 --hidden 128 --decoder rff --decoder_kwargs '{"num_features":1024,"lengthscale":1.2,"ard":true,"learn_lengthscale":true,"learn_omegas":false,"seed":0}' --feat_dec_hidden 128 --neg_ratio 20 --lambda_feat 1.0 --lambda_kl 0.005 --kl_warmup_epochs 100 --val_auc_neg_ratio 1 --lr 1e-4 --edge_weighting none --task_weighting fixed
 ```
 
 A1 (windows)
