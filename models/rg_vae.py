@@ -396,6 +396,8 @@ class RG_VAE(nn.Module):
             L_edge = self._bce_weighted_renorm(logits, labels, pos_weight=r)
         elif edge_weighting == "class_mean":
             L_edge = self._bce_class_mean(logits, labels)
+        elif edge_weighting == "none":
+            L_edge = F.binary_cross_entropy_with_logits(logits, labels.float(), reduction="mean")
         else:
             raise ValueError(f"Unknown edge_weighting: {edge_weighting}")
 
@@ -757,6 +759,8 @@ class RG_P_VAE(nn.Module):
             L_edge = self._bce_weighted_renorm(logits, labels, pos_weight=r)
         elif edge_weighting == "class_mean":
             L_edge = self._bce_class_mean(logits, labels)
+        elif edge_weighting == "none":
+            L_edge = F.binary_cross_entropy_with_logits(logits, labels.float(), reduction="mean")
         else:
             raise ValueError(f"Unknown edge_weighting: {edge_weighting}")
 

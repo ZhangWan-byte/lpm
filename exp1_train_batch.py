@@ -313,7 +313,7 @@ def parse_args():
     ap.add_argument("--latent_dim", type=int, default=16)
     ap.add_argument("--hidden", type=int, default=128)
     ap.add_argument("--neg_ratio", type=int, default=10)
-    ap.add_argument("--edge_weighting", default="weighted_renorm", choices=["weighted_renorm", 'class_mean'], help="Edge reconstruction loss weight")
+    ap.add_argument("--edge_weighting", default="weighted_renorm", choices=["weighted_renorm", 'class_mean', 'none'], help="Edge reconstruction loss weight")
     ap.add_argument("--task_weighting", default="uncertainty", choices=["uncertainty", "fixed"], help="Node feature reconstruction loss weight")
 
     ap.add_argument("--split_seed", type=int, default=42)
