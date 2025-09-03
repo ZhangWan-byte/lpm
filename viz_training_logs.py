@@ -22,7 +22,10 @@ import matplotlib.pyplot as plt
 
 # ---------- small utils ----------
 def safe_get(d, key, default=None):
-    return d[key] if key in d.files else default
+    # Works for both np.load(..., allow_pickle=True) NpzFile and dicts
+    if hasattr(d, "files"):
+        return d[key] if key in d.files else default
+    return d.get(key, default)
 
 def ema(x, alpha=0.2):
     x = np.asarray(x, dtype=float)
@@ -54,20 +57,26 @@ def ema(x, alpha=0.2):
 def load_metrics_npz(path_npz):
     data = np.load(path_npz, allow_pickle=True)
     return {
-        "epochs":   safe_get(data, "epochs"),
-        "tr_total": safe_get(data, "tr_total"),
-        "tr_edge":  safe_get(data, "tr_edge"),
-        "tr_feat":  safe_get(data, "tr_feat"),
-        "tr_kl":    safe_get(data, "tr_kl"),
-        "va_total": safe_get(data, "va_total"),
-        "va_edge":  safe_get(data, "va_edge"),
-        "va_feat":  safe_get(data, "va_feat"),
-        "va_kl":    safe_get(data, "va_kl"),
-        "va_auc":   safe_get(data, "va_auc"),
-        "va_ap":    safe_get(data, "va_ap"),
-        "gwd2":     safe_get(data, "gwd2"),
-        "lp_rmse":  safe_get(data, "lp_rmse"),
-        "setting_dir": safe_get(data, "setting_dir"),
+        "epochs":     safe_get(data, "epochs"),
+        "tr_total":   safe_get(data, "tr_total"),
+        "tr_edge":    safe_get(data, "tr_edge"),
+        "tr_feat":    safe_get(data, "tr_feat"),
+        "tr_kl":      safe_get(data, "tr_kl"),
+        "va_total":   safe_get(data, "va_total"),
+        "va_edge":    safe_get(data, "va_edge"),
+        "va_feat":    safe_get(data, "va_feat"),
+        "va_kl":      safe_get(data, "va_kl"),
+        "va_auc":     safe_get(data, "va_auc"),
+        "va_ap":      safe_get(data, "va_ap"),
+        "gwd2":       safe_get(data, "gwd2"),
+        "lp_rmse":    safe_get(data, "lp_rmse"),
+        "setting_dir":safe_get(data, "setting_dir"),
+
+        # NEW (optional): task weights; may be absent in older logs
+        "tr_wedges":  safe_get(data, "tr_wedges"),  # training w_edge per epoch
+        "tr_wfeats":  safe_get(data, "tr_wfeats"),  # training w_feat per epoch
+        "va_wedges":  safe_get(data, "va_wedges"),  # validation w_edge per epoch
+        "va_wfeats":  safe_get(data, "va_wfeats"),  # validation w_feat per epoch
     }
 
 def summarize(metrics, name="run"):
@@ -213,6 +222,78 @@ def plot_geometry_split(ax_gwd, ax_lp, epochs, gwd2, lp_rmse, run_label="", colo
     ax_gwd.set_title("GWD$^2$ (val)"); ax_gwd.set_xlabel("epoch"); ax_gwd.set_ylabel("value"); ax_gwd.grid(True)
     ax_lp.set_title("LP-RMSE (val)");  ax_lp.set_xlabel("epoch");  ax_lp.set_ylabel("value");  ax_lp.grid(True)
 
+def plot_coefficients(ax,
+                      epochs,
+                      tr_wedges=None,
+                      tr_wfeats=None,
+                      va_wedges=None,
+                      va_wfeats=None,
+                      run_label="",
+                      colors=None,
+                      smooth=False):
+    """
+    Plot train/val task weights w_edge / w_feat over epochs.
+    Any of the four series can be None; the function will skip them.
+    """
+    if epochs is None:
+        return ax
+
+    # color handling
+    c_base  = colors[run_label]["base"]  if colors and run_label in colors else None
+    c_light = colors[run_label]["light"] if colors and run_label in colors else None
+
+    def _prep(y):
+        if y is None:
+            return None, None
+        y = np.asarray(y, dtype=float)
+        ep = np.asarray(epochs, dtype=float)
+        # If lengths mismatch or all-NaN, try to align or skip
+        if y.shape != ep.shape:
+            n = min(len(y), len(ep))
+            y, ep = y[:n], ep[:n]
+        if np.all(np.isnan(y)):
+            return None, None
+        if smooth:
+            y = ema(y)  # your EMA already handles NaNs nicely
+        # mask NaNs for plotting continuity
+        mask = ~np.isnan(y)
+        return ep[mask], y[mask]
+
+    # train edge
+    x, y = _prep(tr_wedges)
+    if x is not None:
+        ax.plot(x, y, color=c_base, linestyle='-', linewidth=2.0,
+                label=f"{run_label} — train w_edge")
+
+    # val edge
+    x, y = _prep(va_wedges)
+    if x is not None:
+        ax.plot(x, y, color=c_base, linestyle='--', linewidth=2.0,
+                alpha=0.9, label=f"{run_label} — val w_edge")
+
+    # train feat
+    x, y = _prep(tr_wfeats)
+    if x is not None:
+        ax.plot(x, y, color=c_light or c_base, linestyle='-.', linewidth=2.0,
+                label=f"{run_label} — train w_feat")
+
+    # val feat
+    x, y = _prep(va_wfeats)
+    if x is not None:
+        ax.plot(x, y, color=c_light or c_base, linestyle=':', linewidth=2.0,
+                alpha=0.9, label=f"{run_label} — val w_feat")
+
+    ax.set_xlabel("epoch")
+    ax.set_ylabel("task weight")
+    ax.grid(True, alpha=0.25, linestyle='--')
+
+    # Helpful hint if nothing plotted
+    if not ax.lines:
+        ax.text(0.5, 0.5, f"No weight series in {run_label}",
+                ha='center', va='center', transform=ax.transAxes, fontsize=10, color='gray')
+
+    return ax
+
 # ---------- main ----------
 def main():
     ap = argparse.ArgumentParser()
@@ -273,15 +354,6 @@ def main():
     fig2.suptitle("RG-VAE Training — Link Prediction (val)")
     fig2.tight_layout(rect=[0, 0.03, 1, 0.97])
 
-    # # ---- PLOTS: Geometry (GWD^2, LP-RMSE)
-    # fig3, ax3 = plt.subplots(1, 1, figsize=(10, 5))
-    # for (rdir, m) in loaded:
-    #     lbl = os.path.basename(os.path.normpath(rdir))
-    #     plot_geometry(ax3, m["epochs"], m["gwd2"], m["lp_rmse"], run_label=lbl, colors=colors, smooth=args.smooth)
-    # ax3.legend(ncol=2, fontsize=9)
-    # fig3.suptitle("RG-VAE Training — Geometry Metrics (val)")
-    # fig3.tight_layout(rect=[0, 0.03, 1, 0.97])
-
     # ---- PLOTS: Geometry (GWD^2, LP-RMSE) in two sub-figures
     fig3, (ax3_gwd, ax3_lp) = plt.subplots(1, 2, figsize=(12, 5))
     for (rdir, m) in loaded:
@@ -296,15 +368,44 @@ def main():
     fig3.suptitle("RG-VAE Training — Geometry Metrics (val)")
     fig3.tight_layout(rect=[0, 0.03, 1, 0.97])
 
+    # ---- PLOTS: train-val weights for edges & feats
+    fig4, ax4 = plt.subplots(1, 1, figsize=(10, 5))
+    any_plotted = False
+    for (rdir, m) in loaded:
+        lbl = os.path.basename(os.path.normpath(rdir))
+        plot_coefficients(
+            ax4,
+            m["epochs"],
+            tr_wedges=m.get("tr_wedges"),
+            tr_wfeats=m.get("tr_wfeats"),
+            va_wedges=m.get("va_wedges"),
+            va_wfeats=m.get("va_wfeats"),
+            run_label=lbl,
+            colors=colors,
+            smooth=args.smooth,
+        )
+        if m.get("tr_wedges") is not None or m.get("tr_wfeats") is not None \
+        or m.get("va_wedges") is not None or m.get("va_wfeats") is not None:
+            any_plotted = True
+
+    if not any_plotted:
+        ax4.text(0.5, 0.5, "No weight series (w_edge / w_feat) found in metrics.npz",
+                ha='center', va='center', transform=ax4.transAxes, fontsize=11, color='gray')
+
+    ax4.legend(ncol=2, fontsize=9)
+    fig4.suptitle("RG-VAE Train–Val Task Weights (w_edge & w_feat)")
+    fig4.tight_layout(rect=[0, 0.03, 1, 0.97])
 
     # ---- Save figures
     losses_png   = os.path.join(out_dir, "losses.png")
     auc_ap_png   = os.path.join(out_dir, "auc_ap.png")
     geometry_png = os.path.join(out_dir, "geometry.png")
+    coefficients_png = os.path.join(out_dir, "coefficients.png")
     fig1.savefig(losses_png, dpi=150)
     fig2.savefig(auc_ap_png, dpi=150)
     fig3.savefig(geometry_png, dpi=150)
-    print(f"[SAVED] {losses_png}\n[SAVED] {auc_ap_png}\n[SAVED] {geometry_png}")
+    fig4.savefig(coefficients_png, dpi=150)
+    print(f"[SAVED] {losses_png}\n[SAVED] {auc_ap_png}\n[SAVED] {geometry_png}\n[SAVED] {coefficients_png}")
 
     # ---- Summaries
     summaries = []

@@ -373,6 +373,7 @@ class RG_VAE(nn.Module):
         pos_pairs: torch.Tensor,
         neg_pairs: torch.Tensor,
         feats: torch.Tensor,                 # observed node features x
+        lambda_edge: float = 1.0,
         lambda_feat: float = 1.0,            # used only when task_weighting='fixed'
         lambda_kl: float = 1e-3,
         edge_weighting: str = "weighted_renorm",  # or 'class_mean'
@@ -426,9 +427,9 @@ class RG_VAE(nn.Module):
 
         elif task_weighting == "fixed":
             
-            loss = L_edge + lambda_feat * L_feat + lambda_kl * L_kl
+            loss = lambda_edge * L_edge + lambda_feat * L_feat + lambda_kl * L_kl
 
-            w_edge = torch.tensor(1.0, device=z.device)
+            w_edge = torch.tensor(lambda_edge, device=z.device)
             w_feat = torch.tensor(lambda_feat, device=z.device)
         
         else:
@@ -729,6 +730,7 @@ class RG_P_VAE(nn.Module):
         pos_pairs: torch.Tensor,
         neg_pairs: torch.Tensor,
         feats: torch.Tensor,              # observed node features x
+        lambda_edge: float = 1.0,
         lambda_feat: float = 1.0,
         lambda_kl: float = 1e-3,
         edge_weighting: str = "weighted_renorm",  # or 'class_mean'
@@ -792,9 +794,9 @@ class RG_P_VAE(nn.Module):
 
         elif task_weighting == "fixed":
 
-            loss = L_edge + lambda_feat * L_feat + lambda_kl * L_kl + metabolic
+            loss = lambda_edge * L_edge + lambda_feat * L_feat + lambda_kl * L_kl + metabolic
 
-            w_edge = torch.tensor(1.0, device=z_embed.device)
+            w_edge = torch.tensor(lambda_edge, device=z_embed.device)
             w_feat = torch.tensor(lambda_feat, device=z_embed.device)
 
         else:

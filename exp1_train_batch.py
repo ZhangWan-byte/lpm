@@ -121,6 +121,7 @@ def step_graph(model: RG_VAE,
                exclude_pairs: Optional[set],
                device: torch.device,
                lambda_feat: float,
+               lambda_edge: float,
                lambda_kl: float,
                edge_weighting: str,
                task_weighting: str) -> Tuple[torch.Tensor, Dict[str, float]]:
@@ -131,7 +132,7 @@ def step_graph(model: RG_VAE,
     pos = torch.from_numpy(pos_edges).long().to(device)
     neg = torch.from_numpy(neg_edges).long().to(device)
     loss, stats = model.elbo(
-        A_norm, pos, neg, feats=feats_t, lambda_feat=lambda_feat, lambda_kl=lambda_kl, 
+        A_norm, pos, neg, feats=feats_t, lambda_feat=lambda_feat, lambda_edge=lambda_edge, lambda_kl=lambda_kl,
         edge_weighting=edge_weighting, task_weighting=task_weighting
     )
     return loss, stats
@@ -329,6 +330,7 @@ def parse_args():
     # feature & loss
     ap.add_argument("--use_struct_feats", action="store_true")
     ap.add_argument("--lambda_feat", type=float, default=1.0)
+    ap.add_argument("--lambda_edge", type=float, default=1.0)
     ap.add_argument("--lambda_kl", type=float, default=5e-3)
     ap.add_argument("--kl_warmup_epochs", type=int, default=50)
 
@@ -431,7 +433,7 @@ def main():
         for (_, _, _, undirected, A_norm, feats_t, tr, _, exclude) in tqdm(loaded, desc=f"Epoch {epoch:03d}", ncols=80, file=sys.stdout):
             loss, stats = step_graph(
                 model, A_norm, feats_t, tr, args.neg_ratio, undirected, exclude, device,
-                lambda_feat=args.lambda_feat, lambda_kl=lam_kl, 
+                lambda_feat=args.lambda_feat, lambda_edge=args.lambda_edge, lambda_kl=lam_kl,
                 edge_weighting=args.edge_weighting, task_weighting=args.task_weighting
             )
             opt.zero_grad()
@@ -455,7 +457,7 @@ def main():
             for (_, _, _, undirected, A_norm, feats_t, _, va, exclude) in loaded:
                 loss, stats = step_graph(
                     model, A_norm, feats_t, va, args.neg_ratio, undirected, exclude, device,
-                    lambda_feat=args.lambda_feat, lambda_kl=lam_kl, 
+                    lambda_feat=args.lambda_feat, lambda_edge=args.lambda_edge, lambda_kl=lam_kl,
                     edge_weighting=args.edge_weighting, task_weighting=args.task_weighting
                 )
                 va_totals += float(loss.item())
@@ -586,6 +588,7 @@ def main():
                 "use_struct_feats": args.use_struct_feats,
                 "feat_dec_hidden": args.feat_dec_hidden,
                 "lambda_feat": args.lambda_feat,
+                "lambda_edge": args.lambda_edge,
                 "lambda_kl": args.lambda_kl,
                 "epoch": epoch,
                 "best_val_total": best_val_total,
@@ -606,6 +609,7 @@ def main():
         "use_struct_feats": args.use_struct_feats,
         "feat_dec_hidden": args.feat_dec_hidden,
         "lambda_feat": args.lambda_feat,
+        "lambda_edge": args.lambda_edge,
         "lambda_kl": args.lambda_kl,
         "epoch": args.epochs,
         "best_val_total": best_val_total,
