@@ -182,24 +182,13 @@ def load_true_positions(graph_dir: str) -> Optional[np.ndarray]:
     npz = np.load(os.path.join(graph_dir, files[0]))
     return np.array(npz["positions"], dtype=np.float32) if "positions" in npz.files else None
 
-# def _posterior_sample_latents(model, A_norm: torch.Tensor, feats_t: torch.Tensor, seed: int = 0) -> np.ndarray:
-#     """Draw one sample z ~ q_phi(z|x,A) via reparameterization using model.encode(...)."""
-#     torch.manual_seed(seed)
-#     try:
-#         mu, logvar = model.encode(A_norm, feats=feats_t)  # preferred signature
-#     except TypeError:
-#         mu, logvar = model.encode(A_norm)  # fallback if older signature
-#     std = torch.exp(0.5 * logvar)
-#     eps = torch.randn_like(std)
-#     z = mu + eps * std
-#     return z.detach().cpu().numpy()
-
 def _posterior_sample_latents(
     model,
     A_norm: torch.Tensor,
     feats_t: torch.Tensor,
     seed: int = 0,
     model_name: str = "RG-G-VAE",
+    deterministic_inference: bool = False
 ) -> np.ndarray:
     """
     Draw one posterior sample of node-level latent *positions*, branching by `model_name`.
@@ -231,10 +220,14 @@ def _posterior_sample_latents(
             mu, logvar = model.encode(A_norm, feats=feats_t)
         except TypeError:
             mu, logvar = model.encode(A_norm)
-        std = torch.exp(0.5 * logvar)
-        eps = torch.randn_like(std)
-        z = mu + eps * std
-        return z.detach().cpu().numpy()
+        
+        if deterministic_inference:
+            return mu.detach().cpu().numpy()
+        else:
+            std = torch.exp(0.5 * logvar)
+            eps = torch.randn_like(std)
+            z = mu + eps * std
+            return z.detach().cpu().numpy()
     
     else:
         raise ValueError(f"Unknown model name: {model_name}")
@@ -249,7 +242,9 @@ def compute_gwd_ignr(model: "RG_VAE",
                      seed: int = 0,
                      max_iter: int = 200,
                      tol: float = 1e-9,
-                     model_name: str = "RG-G-VAE") -> float:
+                     model_name: str = "RG-G-VAE",
+                     center: bool = False,
+                     deterministic_inference: bool = False) -> float:
     """
     IGNR-style GWD^2: compare metric spaces (Z_true, Z_hat) using POT's ot.gromov_wasserstein2.
     - Z_true: ground-truth latent positions (numpy [N,d_true])
@@ -259,6 +254,8 @@ def compute_gwd_ignr(model: "RG_VAE",
     N = A_norm.size(0)
     idx = _subsample_indices(N, max_nodes, seed)
     Zt = Z_true[idx].astype(np.float64)
+    if center:
+        Zt -= Zt.mean(axis=0, keepdims=True)
     Ct = _pairwise_euclidean(Zt)  # observed cost via true LPs
 
     k = Ct.shape[0]
@@ -267,7 +264,9 @@ def compute_gwd_ignr(model: "RG_VAE",
 
     gws = []
     for s in range(num_samples):
-        Zs = _posterior_sample_latents(model, A_norm, feats_t, model_name=model_name, seed=seed + s)
+        Zs = _posterior_sample_latents(model, A_norm, feats_t, model_name=model_name, seed=seed + s, deterministic_inference=deterministic_inference)
+        if center:
+            Zs -= Zs.mean(axis=0, keepdims=True)
         Zh = Zs[idx].astype(np.float64)
         Ch = _pairwise_euclidean(Zh)
         # POT non-entropic GW^2 with squared loss
