@@ -1,7 +1,7 @@
 # exp1_test_batch.py
 """
 Infer latent positions ONCE per test graph, save them next to the checkpoint,
-then compute (i) GWD^2 using POT on the saved Z_hat and (ii) LP-RSE (RMSE after Procrustes).
+then compute (i) GWD using POT on the saved Z_hat and (ii) LP-RSE (RMSE after Procrustes).
 
 Usage:
   python exp1_test_batch.py --setting_dir sim_data_batch/A1 --ckpt runs/A1/ckpt.pt \
@@ -24,10 +24,9 @@ def set_all_seeds(seed:int):
     if torch.cuda.is_available(): torch.cuda.manual_seed_all(seed)
     torch.backends.cudnn.deterministic = True; torch.backends.cudnn.benchmark = False
 
-
-def gwd2_from_positions(Z_true: np.ndarray, Z_hat: np.ndarray, max_nodes:int=2000, seed:int=0, center:bool=False,
-                        max_iter:int=200, tol:float=1e-9) -> float:
-    """GW^2 between metric spaces induced by Z_true and Z_hat (no re-inference)."""
+def gwd_from_positions(Z_true: np.ndarray, Z_hat: np.ndarray, max_nodes:int=2000, seed:int=0, center:bool=False,
+                       max_iter:int=200, tol:float=1e-9) -> float:
+    """GW between metric spaces induced by Z_true and Z_hat (no re-inference)."""
     N = Z_true.shape[0]
     idx = _subsample_indices(N, max_nodes, seed)
     Zt = Z_true[idx].astype(np.float64); Zh = Z_hat[idx].astype(np.float64)
@@ -39,7 +38,8 @@ def gwd2_from_positions(Z_true: np.ndarray, Z_hat: np.ndarray, max_nodes:int=200
         gw2 = ot.gromov_wasserstein2(Ct, Ch, p, q, loss_fun='square_loss', max_iter=max_iter, tol=tol, verbose=False)
     except AttributeError:
         gw2 = ot.gromov.gromov_wasserstein2(Ct, Ch, p, q, loss_fun='square_loss', max_iter=max_iter, tol=tol, verbose=False)
-    return float(gw2)
+    # numerical guard in case of tiny negative due to round-off
+    return float(np.sqrt(max(gw2, 0.0)))
 
 
 def parse_args():
@@ -110,23 +110,23 @@ def main():
         zpath = os.path.join(ckpt_dir, "Zhat", f"{base}_Zhat.npy"); np.save(zpath, Z_hat)
 
         # ---- metrics reusing the saved inference ----
-        gwd2 = gwd2_from_positions(Z_true, Z_hat, max_nodes=args.gwd_nodes, seed=args.seed, center=args.center)
+        gwd = gwd_from_positions(Z_true, Z_hat, max_nodes=args.gwd_nodes, seed=args.seed, center=args.center)
 
         # LP-RMSE (RMSE after Procrustes) on (optionally) subsampled nodes
         k = min(Z_true.shape[0], args.lp_nodes) if args.lp_nodes > 0 else Z_true.shape[0]
         idx = np.arange(Z_true.shape[0]) if k==Z_true.shape[0] else np.sort(np.random.default_rng(args.seed).choice(Z_true.shape[0], size=k, replace=False))
         rmse = procrustes_rmse(Z_true[idx], Z_hat[idx], center=True, scale=False)
 
-        print(f"{base}: GWD^2={gwd2:.6f} | LP-RMSE={rmse:.6f} | Z_hat={zpath}")
-        metrics.append({"graph": base, "n_nodes": int(N), "gwd2": float(gwd2), "lp_rmse": float(rmse), "zhat_path": zpath})
+        print(f"{base}: GWD={gwd:.6f} | LP-RMSE={rmse:.6f} | Z_hat={zpath}")
+        metrics.append({"graph": base, "n_nodes": int(N), "gwd": float(gwd), "lp_rmse": float(rmse), "zhat_path": zpath})
 
     # summary
     if metrics:
-        mean_gwd2 = float(np.mean([m["gwd2"] for m in metrics]))
+        mean_gwd = float(np.mean([m["gwd"] for m in metrics]))
         mean_rmse  = float(np.mean([m["lp_rmse"] for m in metrics]))
-        print(f"\nSummary over {len(metrics)} graphs: mean GWD^2={mean_gwd2:.6f} | mean LP-RMSE={mean_rmse:.6f}")
+        print(f"\nSummary over {len(metrics)} graphs: mean GWD={mean_gwd:.6f} | mean LP-RMSE={mean_rmse:.6f}")
         with open(os.path.join(ckpt_dir, "test_metrics.json"), "w") as f:
-            json.dump({"mean_gwd2": mean_gwd2, "mean_lp_rmse": mean_rmse, "details": metrics}, f, indent=2)
+            json.dump({"mean_gwd": mean_gwd, "mean_lp_rmse": mean_rmse, "details": metrics}, f, indent=2)
     else:
         print("No graphs evaluated.")
 
