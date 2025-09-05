@@ -1,0 +1,163 @@
+{
+  "summary": {
+    "num_graphs": 22,
+    "mean_gwd": 2.2984381970652494,
+    "mean_lp_rmse": 1.5113058439529325
+  },
+  "details": [
+    {
+      "graph": "A1_poly_feats_N100_test_00",
+      "n_nodes": 100,
+      "gwd": 2.4617236056154614,
+      "lp_rmse": 1.5507204373999492,
+      "zhat_path": "results_mle/A1_poly_feats\\Zhat_mle_full\\A1_poly_feats_N100_test_00_Zhat_mle.npy"
+    },
+    {
+      "graph": "A1_poly_feats_N100_test_01",
+      "n_nodes": 100,
+      "gwd": 2.3675889810261843,
+      "lp_rmse": 1.5261594980342041,
+      "zhat_path": "results_mle/A1_poly_feats\\Zhat_mle_full\\A1_poly_feats_N100_test_01_Zhat_mle.npy"
+    },
+    {
+      "graph": "A1_poly_feats_N125_test_00",
+      "n_nodes": 125,
+      "gwd": 2.3770268882636674,
+      "lp_rmse": 1.2212178469519341,
+      "zhat_path": "results_mle/A1_poly_feats\\Zhat_mle_full\\A1_poly_feats_N125_test_00_Zhat_mle.npy"
+    },
+    {
+      "graph": "A1_poly_feats_N125_test_01",
+      "n_nodes": 125,
+      "gwd": 2.374415726794634,
+      "lp_rmse": 1.2738294270584758,
+      "zhat_path": "results_mle/A1_poly_feats\\Zhat_mle_full\\A1_poly_feats_N125_test_01_Zhat_mle.npy"
+    },
+    {
+      "graph": "A1_poly_feats_N150_test_00",
+      "n_nodes": 150,
+      "gwd": 2.295140573723722,
+      "lp_rmse": 1.58975465621377,
+      "zhat_path": "results_mle/A1_poly_feats\\Zhat_mle_full\\A1_poly_feats_N150_test_00_Zhat_mle.npy"
+    },
+    {
+      "graph": "A1_poly_feats_N150_test_01",
+      "n_nodes": 150,
+      "gwd": 2.292155237970059,
+      "lp_rmse": 1.5893880132639728,
+      "zhat_path": "results_mle/A1_poly_feats\\Zhat_mle_full\\A1_poly_feats_N150_test_01_Zhat_mle.npy"
+    },
+    {
+      "graph": "A1_poly_feats_N175_test_00",
+      "n_nodes": 175,
+      "gwd": 2.321026021036247,
+      "lp_rmse": 1.583618011390971,
+      "zhat_path": "results_mle/A1_poly_feats\\Zhat_mle_full\\A1_poly_feats_N175_test_00_Zhat_mle.npy"
+    },
+    {
+      "graph": "A1_poly_feats_N175_test_01",
+      "n_nodes": 175,
+      "gwd": 2.2923878344556745,
+      "lp_rmse": 1.2326939971385518,
+      "zhat_path": "results_mle/A1_poly_feats\\Zhat_mle_full\\A1_poly_feats_N175_test_01_Zhat_mle.npy"
+    },
+    {
+      "graph": "A1_poly_feats_N200_test_00",
+      "n_nodes": 200,
+      "gwd": 2.296950717231215,
+      "lp_rmse": 1.5834677948627602,
+      "zhat_path": "results_mle/A1_poly_feats\\Zhat_mle_full\\A1_poly_feats_N200_test_00_Zhat_mle.npy"
+    },
+    {
+      "graph": "A1_poly_feats_N200_test_01",
+      "n_nodes": 200,
+      "gwd": 2.170814774947279,
+      "lp_rmse": 1.5839181667511057,
+      "zhat_path": "results_mle/A1_poly_feats\\Zhat_mle_full\\A1_poly_feats_N200_test_01_Zhat_mle.npy"
+    },
+    {
+      "graph": "A1_poly_feats_N225_test_00",
+      "n_nodes": 225,
+      "gwd": 2.1558421635257394,
+      "lp_rmse": 1.6070287384652606,
+      "zhat_path": "results_mle/A1_poly_feats\\Zhat_mle_full\\A1_poly_feats_N225_test_00_Zhat_mle.npy"
+    },
+    {
+      "graph": "A1_poly_feats_N225_test_01",
+      "n_nodes": 225,
+      "gwd": 2.2528683968448573,
+      "lp_rmse": 1.6625405509439821,
+      "zhat_path": "results_mle/A1_poly_feats\\Zhat_mle_full\\A1_poly_feats_N225_test_01_Zhat_mle.npy"
+    },
+    {
+      "graph": "A1_poly_feats_N250_test_00",
+      "n_nodes": 250,
+      "gwd": 2.0789634064795477,
+      "lp_rmse": 1.6188541851173415,
+      "zhat_path": "results_mle/A1_poly_feats\\Zhat_mle_full\\A1_poly_feats_N250_test_00_Zhat_mle.npy"
+    },
+    {
+      "graph": "A1_poly_feats_N250_test_01",
+      "n_nodes": 250,
+      "gwd": 2.148715159798701,
+      "lp_rmse": 1.1442653664684796,
+      "zhat_path": "results_mle/A1_poly_feats\\Zhat_mle_full\\A1_poly_feats_N250_test_01_Zhat_mle.npy"
+    },
+    {
+      "graph": "A1_poly_feats_N275_test_00",
+      "n_nodes": 275,
+      "gwd": 2.0976828438398125,
+      "lp_rmse": 1.5792479193205233,
+      "zhat_path": "results_mle/A1_poly_feats\\Zhat_mle_full\\A1_poly_feats_N275_test_00_Zhat_mle.npy"
+    },
+    {
+      "graph": "A1_poly_feats_N275_test_01",
+      "n_nodes": 275,
+      "gwd": 2.077034098958486,
+      "lp_rmse": 1.6266335872418747,
+      "zhat_path": "results_mle/A1_poly_feats\\Zhat_mle_full\\A1_poly_feats_N275_test_01_Zhat_mle.npy"
+    },
+    {
+      "graph": "A1_poly_feats_N300_test_00",
+      "n_nodes": 300,
+      "gwd": 2.0468460782415843,
+      "lp_rmse": 1.6199449042896303,
+      "zhat_path": "results_mle/A1_poly_feats\\Zhat_mle_full\\A1_poly_feats_N300_test_00_Zhat_mle.npy"
+    },
+    {
+      "graph": "A1_poly_feats_N300_test_01",
+      "n_nodes": 300,
+      "gwd": 1.992536524682749,
+      "lp_rmse": 1.591689788319218,
+      "zhat_path": "results_mle/A1_poly_feats\\Zhat_mle_full\\A1_poly_feats_N300_test_01_Zhat_mle.npy"
+    },
+    {
+      "graph": "A1_poly_feats_N50_test_00",
+      "n_nodes": 50,
+      "gwd": 2.7824159910796182,
+      "lp_rmse": 1.5281449220092762,
+      "zhat_path": "results_mle/A1_poly_feats\\Zhat_mle_full\\A1_poly_feats_N50_test_00_Zhat_mle.npy"
+    },
+    {
+      "graph": "A1_poly_feats_N50_test_01",
+      "n_nodes": 50,
+      "gwd": 2.702309900813604,
+      "lp_rmse": 1.6225453022504641,
+      "zhat_path": "results_mle/A1_poly_feats\\Zhat_mle_full\\A1_poly_feats_N50_test_01_Zhat_mle.npy"
+    },
+    {
+      "graph": "A1_poly_feats_N75_test_00",
+      "n_nodes": 75,
+      "gwd": 2.6198625483398987,
+      "lp_rmse": 1.643075027533994,
+      "zhat_path": "results_mle/A1_poly_feats\\Zhat_mle_full\\A1_poly_feats_N75_test_00_Zhat_mle.npy"
+    },
+    {
+      "graph": "A1_poly_feats_N75_test_01",
+      "n_nodes": 75,
+      "gwd": 2.3613328617667517,
+      "lp_rmse": 1.2699904259387822,
+      "zhat_path": "results_mle/A1_poly_feats\\Zhat_mle_full\\A1_poly_feats_N75_test_01_Zhat_mle.npy"
+    }
+  ]
+}
