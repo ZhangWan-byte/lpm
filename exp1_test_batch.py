@@ -73,6 +73,7 @@ def main():
     set_all_seeds(args.seed)
     device = torch.device(args.device)
     ckpt_dir = os.path.dirname(os.path.abspath(args.ckpt))
+    print(ckpt_dir)
 
     graph_dirs = [g for g in list_graph_dirs(args.setting_dir) if "_test_" in os.path.basename(g)]
     if args.max_graphs and len(graph_dirs) > args.max_graphs:
@@ -84,7 +85,7 @@ def main():
     feats0 = load_node_features(graph_dirs[0], standardize=True)
     model = build_model(feats0.shape[1], args).to(device)
     state = torch.load(args.ckpt, map_location=device)
-    model.load_state_dict(state.get("model", state), strict=False)
+    model.load_state_dict(state["state_dict"], strict=True)
     model.eval()
 
     metrics = []
@@ -109,13 +110,13 @@ def main():
         os.makedirs(os.path.join(ckpt_dir, "Zhat"), exist_ok=True)
         zpath = os.path.join(ckpt_dir, "Zhat", f"{base}_Zhat.npy"); np.save(zpath, Z_hat)
 
-        # ---- metrics reusing the saved inference ----
-        gwd = gwd_from_positions(Z_true, Z_hat, max_nodes=args.gwd_nodes, seed=args.seed, center=args.center)
-
         # LP-RMSE (RMSE after Procrustes) on (optionally) subsampled nodes
         k = min(Z_true.shape[0], args.lp_nodes) if args.lp_nodes > 0 else Z_true.shape[0]
         idx = np.arange(Z_true.shape[0]) if k==Z_true.shape[0] else np.sort(np.random.default_rng(args.seed).choice(Z_true.shape[0], size=k, replace=False))
-        rmse = procrustes_rmse(Z_true[idx], Z_hat[idx], center=True, scale=False)
+        rmse, Z_reduced = procrustes_rmse(Z_true[idx], Z_hat[idx], center=True, scale=False)
+
+        # ---- metrics reusing the saved inference ----
+        gwd = gwd_from_positions(Z_true, Z_hat=Z_reduced, max_nodes=args.gwd_nodes, seed=args.seed, center=args.center)
 
         print(f"{base}: GWD={gwd:.6f} | LP-RMSE={rmse:.6f} | Z_hat={zpath}")
         metrics.append({"graph": base, "n_nodes": int(N), "gwd": float(gwd), "lp_rmse": float(rmse), "zhat_path": zpath})

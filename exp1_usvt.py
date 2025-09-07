@@ -74,7 +74,7 @@ def parse_args():
 
     # USVT hyperparams
     ap.add_argument("--gamma", type=float, default=0.01, help="USVT threshold multiplier")
-    ap.add_argument("--d_max", type=int, default=None, help="Max kept eigen-components")
+    ap.add_argument("--d_max", type=int, default=2, help="Max kept eigen-components")
     ap.add_argument("--energy", type=float, default=1.0, help="Energy fraction to keep (<=1.0)")
     ap.add_argument("--eps", type=float, default=1e-10, help="Drop eigenvalues below this after scaling")
 
@@ -163,16 +163,17 @@ def main():
             zpath = os.path.join(z_dir_test, f"{base}_Zhat_usvt.npy")
             np.save(zpath, Z_hat)
 
-            # Metrics: GWD (not squared) + LP-RMSE
-            gwd = gwd_from_positions(
-                Z_true=Z_true, Z_hat=Z_hat, max_nodes=args.gwd_nodes, seed=args.seed, center=args.center
-            )
+            # Metrics: LP-RMSE + GWD
             k = min(Z_true.shape[0], args.lp_nodes) if args.lp_nodes > 0 else Z_true.shape[0]
             idx = np.arange(Z_true.shape[0]) if k == Z_true.shape[0] else np.sort(
                 np.random.default_rng(args.seed).choice(Z_true.shape[0], size=k, replace=False)
             )
-            lp_rmse = procrustes_rmse(Z_true[idx], Z_hat[idx], center=True, scale=False)
-
+            lp_rmse, Z_reduced = procrustes_rmse(Z_true[idx], Z_hat[idx], center=True, scale=False)
+            
+            gwd = gwd_from_positions(
+                Z_true=Z_true, Z_hat=Z_reduced, max_nodes=args.gwd_nodes, seed=args.seed, center=args.center
+            )
+            
             print(f"{base}: GWD={gwd:.6f} | LP-RMSE={lp_rmse:.6f}")
             metrics.append({
                 "graph": base,

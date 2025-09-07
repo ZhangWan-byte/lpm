@@ -6,6 +6,9 @@
 /__pycache__/
 /models/checkpoints
 /results
+/results_mle
+/results_usvt
+/results_vi
 /sim_data*
 /dataset
 /legacy

@@ -25,11 +25,10 @@ import ot  # POT
 from exp1_train_batch import (
     list_graph_dirs,
     load_true_positions,
-    _subsample_indices,
-    _pairwise_euclidean,
     procrustes_rmse,
 )
 from models.utils import load_graph_dir
+from exp1_test_batch import gwd_from_positions
 
 # Use the LatentPositionModel definition provided in the repo
 try:
@@ -48,46 +47,6 @@ def set_all_seeds(seed: int):
         torch.cuda.manual_seed_all(seed)
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
-
-
-@torch.no_grad()
-def gwd_from_positions(
-    Z_true: np.ndarray,
-    Z_hat: np.ndarray,
-    max_nodes: int = 2000,
-    seed: int = 0,
-    center: bool = False,
-    max_iter: int = 200,
-    tol: float = 1e-9,
-) -> float:
-    """
-    POT non-entropic Gromov–Wasserstein **distance** (GW) between metric spaces induced by Z_true and Z_hat.
-    (We compute GW^2 and return its square root.)
-    """
-    N = Z_true.shape[0]
-    idx = _subsample_indices(N, max_nodes, seed)
-    Zt = Z_true[idx].astype(np.float64)
-    Zh = Z_hat[idx].astype(np.float64)
-    if center:
-        Zt -= Zt.mean(0, keepdims=True)
-        Zh -= Zh.mean(0, keepdims=True)
-
-    Ct = _pairwise_euclidean(Zt)
-    Ch = _pairwise_euclidean(Zh)
-    k = Ct.shape[0]
-    p = np.ones((k,), dtype=np.float64) / k
-    q = p
-    G0 = np.outer(p, q)  # deterministic init
-
-    try:
-        gw2 = ot.gromov_wasserstein2(
-            Ct, Ch, p, q, loss_fun="square_loss", max_iter=max_iter, tol=tol, verbose=False, G0=G0
-        )
-    except AttributeError:
-        gw2 = ot.gromov.gromov_wasserstein2(
-            Ct, Ch, p, q, loss_fun="square_loss", max_iter=max_iter, tol=tol, verbose=False, G0=G0
-        )
-    return float(np.sqrt(max(gw2, 0.0)))
 
 
 def _get_embedding_parameter(model: torch.nn.Module, N: int, d: int, device: torch.device) -> torch.nn.Parameter:
@@ -287,7 +246,7 @@ def parse_args():
     ap.add_argument("--seed", type=int, default=0)
 
     # Model / optimization
-    ap.add_argument("--latent_dim", type=int, default=16)
+    ap.add_argument("--latent_dim", type=int, default=2)
     ap.add_argument("--epochs", type=int, default=500)
     ap.add_argument("--lr", type=float, default=1e-2)
     ap.add_argument("--block_size", type=int, default=512, help="Pairwise MLE block size")
@@ -350,16 +309,16 @@ def main():
         zpath = os.path.join(z_dir, f"{base}_Zhat_mle.npy")
         np.save(zpath, Z_hat)
 
-        # -------- Metrics (GWD and LP-RMSE) --------
-        gwd = gwd_from_positions(
-            Z_true=Z_true, Z_hat=Z_hat, max_nodes=args.gwd_nodes, seed=args.seed, center=args.center
-        )
-
+        # -------- Metrics (LP-RMSE and GWD) --------
         k = min(Z_true.shape[0], args.lp_nodes) if args.lp_nodes > 0 else Z_true.shape[0]
         idx = np.arange(Z_true.shape[0]) if k == Z_true.shape[0] else np.sort(
             np.random.default_rng(args.seed).choice(Z_true.shape[0], size=k, replace=False)
         )
-        lp_rmse = procrustes_rmse(Z_true[idx], Z_hat[idx], center=True, scale=False)
+        lp_rmse, Z_reduced = procrustes_rmse(Z_true[idx], Z_hat[idx], center=True, scale=False)
+
+        gwd = gwd_from_positions(
+            Z_true=Z_true, Z_hat=Z_reduced, max_nodes=args.gwd_nodes, seed=args.seed, center=args.center
+        )
 
         print(f"{base}: GWD={gwd:.6f} | LP-RMSE={lp_rmse:.6f} | Z_hat={zpath}")
         metrics.append({

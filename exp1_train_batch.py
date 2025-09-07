@@ -294,7 +294,7 @@ def procrustes_rmse(Z_true: np.ndarray, Z_hat: np.ndarray, center: bool = True, 
     U, _, Vt = np.linalg.svd(Y.T @ X, full_matrices=False)
     R = U @ Vt
     aligned = Y @ R
-    return float(np.sqrt(np.mean((aligned - X) ** 2)))
+    return float(np.sqrt(np.mean((aligned - X) ** 2))), aligned
 
 # ----------------- CLI -----------------
 

@@ -97,6 +97,14 @@ baseline setting + loss balance + D=2
 python exp1_train_batch.py --setting_dir sim_data_batch/A1_poly_feats --model RG-G-VAE --results_dir results --epochs 2000 --latent_dim 2 --hidden 128 --decoder rff --decoder_kwargs '{"num_features":1024,"lengthscale":1.2,"ard":true,"learn_lengthscale":true,"learn_omegas":false,"seed":0}' --feat_dec_hidden 128 --neg_ratio 20 --lambda_feat 1.0 --lambda_edge 1.0 --lambda_kl 0.005 --kl_warmup_epochs 100 --val_auc_neg_ratio 1 --lr 1e-4 --edge_weighting weighted_renorm --task_weighting uncertainty
 ```
 
+### Baselines
+
+MLE
+
+```bash
+python exp1_mle.py --setting_dir ./sim_data_batch/A1_poly_feats --out_dir ./results_mle/A1_poly_feats --latent_dim 2
+```
+
 ### Visualisation
 
 single run
@@ -116,6 +124,12 @@ python viz_training_logs.py --results results/0829_0021_A1,results/0829_0020_A2,
 
 Windows
 
+recon both
 ```bash
-python exp1_test_batch.py --setting_dir ./sim_data_batch/A1_poly_feats --ckpt ./results/0904_2037_A1_poly_feats/rg_vae_A1_poly_feats_best.pt --model RG-G-VAE --hidden 128 --decoder rff --decoder_kwargs "{\"num_features\":1024,\"lengthscale\":1.2,\"ard\":true,\"learn_lengthscale\":true,\"learn_omegas\":false,\"seed\":0}" --feat_dec_hidden 128
+python exp1_test_batch.py --setting_dir ./sim_data_batch/A1_poly_feats --ckpt ./results/0903_2227_A1_poly_feats/rg_vae_A1_poly_feats_best.pt --model RG-G-VAE --latent_dim 32 --hidden 128 --decoder rff --decoder_kwargs "{\"num_features\":1024,\"lengthscale\":1.2,\"ard\":true,\"learn_lengthscale\":true,\"learn_omegas\":false,\"seed\":0}" --feat_dec_hidden 128
+```
+
+recon feats only
+```bash
+python exp1_test_batch.py --setting_dir ./sim_data_batch/A1_poly_feats --ckpt ./results/0906_1219_A1_poly_feats/rg_vae_A1_poly_feats_best.pt --model RG-G-VAE --latent_dim 32 --hidden 128 --decoder rff --decoder_kwargs "{\"num_features\":1024,\"lengthscale\":1.2,\"ard\":true,\"learn_lengthscale\":true,\"learn_omegas\":false,\"seed\":0}" --feat_dec_hidden 128
 ```
