@@ -102,7 +102,18 @@ python exp1_train_batch.py --setting_dir sim_data_batch/A1_poly_feats --model RG
 MLE
 
 ```bash
-python exp1_mle.py --setting_dir ./sim_data_batch/A1_poly_feats --out_dir ./results_mle/A1_poly_feats --latent_dim 2
+python exp1_mle.py --setting_dir ./sim_data_batch/A1_poly_feats --out_dir ./results_mle/A1_poly_feats_D2 --latent_dim 2
+```
+
+VI
+```bash
+python exp1_vi.py --setting_dir ./sim_data_batch/A1_poly_feats --out_dir ./results_vi/A1_poly_feats_D2 --latent_dim 2
+```
+
+USVT
+
+```bash
+python exp1_usvt.py --setting_dir ./sim_data_batch/A1_poly_feats --out_dir ./results_mle/A1_poly_feats_D2 --d_max 2
 ```
 
 ### Visualisation

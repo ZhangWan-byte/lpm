@@ -1,15 +1,16 @@
 # exp1_vi.py
 """
-Variational Inference (VI) baseline on batch datasets (same layout as exp1_train_batch / exp1_test_batch):
+Per-graph VI baseline on batch datasets (same layout as exp1_train_batch / exp1_test_batch):
 - Finds all *_test_* graphs under --setting_dir
-- For each graph, fits a VI latent-position model by maximizing ELBO (Gaussian variational approx)
-- Saves inferred LPs Z_hat (posterior means mu) and reports:
+- For each graph, fits LatentPositionModel with a **Gaussian variational approximation**:
+    ELBO = log-likelihood (using variational means) - KL[q(z)||p(z)]
+- Saves inferred LPs Z_hat (variational means mu) and reports:
     • Gromov–Wasserstein distance (GWD) vs. ground-truth positions  [NOTE: not squared]
     • LP-RMSE via orthogonal Procrustes
 
 Usage:
-  python exp1_vi.py --setting_dir sim_data_batch/A1 --out_dir results_vi/A1 \
-    --latent_dim 16 --epochs 50 --lr 5e-2 --batch_size 65536 --seed 0
+  python exp1_vi.py --setting_dir ./sim_data_batch/A1_poly_feats \
+    --out_dir results_vi/A1_poly_feats --latent_dim 2 --epochs 500 --lr 1e-2 --center
 """
 
 import os
@@ -17,85 +18,23 @@ import json
 import argparse
 import numpy as np
 import torch
-import torch.nn.functional as F
 import random
-import ot  # POT
+import torch.nn.functional as F
 
 # Borrow helpers to match IO and metrics used elsewhere
 from exp1_train_batch import (
     list_graph_dirs,
     load_true_positions,
-    _subsample_indices,
-    _pairwise_euclidean,
     procrustes_rmse,
 )
 from models.utils import load_graph_dir
+from exp1_test_batch import gwd_from_positions
 
-
-# --------------------------- VI Model ---------------------------
-
-class LatentPositionModel_VI(torch.nn.Module):
-    """
-    Simple VI for latent positions z_i in R^d with a standard normal prior.
-    Variational family: factorized Gaussians q(z_i) = N(mu_i, diag(sigma_i^2)).
-
-    Likelihood (edges only): for edge (i,j),
-      p(A_ij=1 | z) = sigmoid( -||z_i - z_j||^2 )
-    We optimize ELBO = E_q[log p(edges|z)] - KL[q(z)||p(z)]
-    using the mean parameters as a proxy in the likelihood term (common in amortized VI baselines).
-    """
-    def __init__(self, N: int, d: int, device: torch.device):
-        super().__init__()
-        self.N, self.d = N, d
-        self.mu = torch.nn.Parameter(0.01 * torch.randn(N, d, device=device))
-        # log_sigma parameterizes std via softplus for positivity and numerical stability
-        self.log_sigma = torch.nn.Parameter(torch.full((N, d), -2.0, device=device))
-
-    def pair_logits(self, pairs_2xM: torch.Tensor) -> torch.Tensor:
-        """
-        pairs_2xM: LongTensor with shape [2, M] containing (i, j) per column.
-        Returns logits for Bernoulli edges: -||mu_i - mu_j||^2 (shape [M]).
-        """
-        i, j = pairs_2xM[0], pairs_2xM[1]
-        di = self.mu[i] - self.mu[j]
-        d2 = (di * di).sum(-1)
-        return -d2  # logits
-
-    def kl_divergence(self) -> torch.Tensor:
-        """
-        KL[q(z)||p(z)] with p(z)=N(0,I), q(z)=N(mu, diag(sigma^2)).
-        Closed form: 0.5 * sum( sigma^2 + mu^2 - 1 - 2*log(sigma) )
-        where sigma = softplus(log_sigma) + eps.
-        """
-        sigma = F.softplus(self.log_sigma) + 1e-6
-        kl = 0.5 * (sigma.pow(2) + self.mu.pow(2) - 1.0 - 2.0 * sigma.log()).sum()
-        return kl
-
-    def elbo(self, edge_index_2xE: torch.Tensor, batch_size: int = 0) -> torch.Tensor:
-        """
-        Compute ELBO = log-likelihood(edges; using mu) - KL.
-        If batch_size > 0, we use a minibatch estimator of the log-likelihood term
-        with appropriate scaling by (E / m).
-        """
-        E = edge_index_2xE.size(1)
-        if E == 0:
-            # No edges: ELBO is just -KL
-            return -self.kl_divergence()
-
-        if batch_size and batch_size < E:
-            # minibatch
-            idx = torch.randint(0, E, (batch_size,), device=edge_index_2xE.device)
-            eb = edge_index_2xE[:, idx]
-            logits = self.pair_logits(eb)
-            loglik_b = F.logsigmoid(logits).sum()
-            scale = E / float(batch_size)
-            log_likelihood = scale * loglik_b
-        else:
-            logits = self.pair_logits(edge_index_2xE)
-            log_likelihood = F.logsigmoid(logits).sum()
-
-        kl = self.kl_divergence()
-        return log_likelihood - kl  # maximize ELBO
+# Use the LatentPositionModel definition provided in the repo (for consistent logits etc.)
+try:
+    from mle_arxiv_ogb import LatentPositionModel  # type: ignore
+except Exception:
+    from mle_arxiv_ogb_C3 import LatentPositionModel  # type: ignore
 
 
 # --------------------------- Utils ---------------------------
@@ -110,107 +49,190 @@ def set_all_seeds(seed: int):
     torch.backends.cudnn.benchmark = False
 
 
-@torch.no_grad()
-def gwd_from_positions(
-    Z_true: np.ndarray,
-    Z_hat: np.ndarray,
-    max_nodes: int = 2000,
-    seed: int = 0,
-    center: bool = False,
-    max_iter: int = 200,
-    tol: float = 1e-9,
-) -> float:
+def _pair_logits_with_means(model, Zi: torch.Tensor, Zj: torch.Tensor) -> torch.Tensor:
     """
-    POT non-entropic Gromov–Wasserstein **distance** (GW) between metric spaces induced by Z_true and Z_hat.
-    (Compute GW^2 then return sqrt.)
+    Use the model's pairwise logits if available; otherwise default to -||Zi - Zj||^2
+    with optional bias/scale if detected on the model.
+    Zi, Zj: [M, d]
     """
-    N = Z_true.shape[0]
-    idx = _subsample_indices(N, max_nodes, seed)
-    Zt = Z_true[idx].astype(np.float64)
-    Zh = Z_hat[idx].astype(np.float64)
-    if center:
-        Zt -= Zt.mean(0, keepdims=True)
-        Zh -= Zh.mean(0, keepdims=True)
-
-    Ct = _pairwise_euclidean(Zt)
-    Ch = _pairwise_euclidean(Zh)
-    k = Ct.shape[0]
-    p = np.ones((k,), dtype=np.float64) / k
-    q = p
-    G0 = np.outer(p, q)  # deterministic init
-
-    try:
-        gw2 = ot.gromov_wasserstein2(
-            Ct, Ch, p, q, loss_fun="square_loss", max_iter=max_iter, tol=tol, verbose=False, G0=G0
-        )
-    except AttributeError:
-        gw2 = ot.gromov.gromov_wasserstein2(
-            Ct, Ch, p, q, loss_fun="square_loss", max_iter=max_iter, tol=tol, verbose=False, G0=G0
-        )
-    return float(np.sqrt(max(gw2, 0.0)))
+    if hasattr(model, "logits"):
+        try:
+            return model.logits(Zi, Zj)
+        except TypeError:
+            pass  # fall back
+    d2 = torch.sum((Zi - Zj) ** 2, dim=-1)
+    bias = getattr(model, "bias", None)
+    log_alpha = getattr(model, "log_alpha", None)
+    if bias is None and log_alpha is None:
+        return -d2
+    b = bias if isinstance(bias, torch.Tensor) else torch.tensor(0.0, device=d2.device)
+    if isinstance(log_alpha, torch.Tensor):
+        alpha = F.softplus(log_alpha) + 1e-4
+    else:
+        alpha = torch.tensor(1.0, device=d2.device)
+    return b - alpha * d2
 
 
-def edges_to_edgeindex_2xE(edges_np: np.ndarray, device: torch.device, undirected: bool) -> torch.Tensor:
+# --------------------------- VI core ---------------------------
+
+def vi_kl(mu: torch.Tensor, log_sigma: torch.Tensor) -> torch.Tensor:
     """
-    Convert edge list (E,2) to edge_index [2,E]. If undirected, keep as provided.
-    Assumes edges already reflect the observed graph (no self-loops).
+    KL[q(z)||p(z)] with p(z)=N(0,I), q(z)=N(mu, diag(sigma^2)), node-wise then summed.
+    sigma = softplus(log_sigma) + eps for positivity.
+    Returns a scalar tensor.
     """
-    if edges_np.size == 0:
-        return torch.empty(2, 0, dtype=torch.long, device=device)
-    ei = torch.from_numpy(edges_np.astype(np.int64)).to(device)
-    if ei.ndim == 2 and ei.shape[1] == 2:
-        ei = ei.t().contiguous()  # [2,E]
-    return ei
+    sigma = F.softplus(log_sigma) + 1e-6
+    return 0.5 * (sigma.pow(2) + mu.pow(2) - 1.0 - 2.0 * sigma.log()).sum()
 
 
-# --------------------------- Training ---------------------------
+def vi_block_nll(
+    base_model,  # LatentPositionModel (for consistent logits / parameters)
+    MU: torch.Tensor,          # [N, d] variational means
+    i_slice: slice,
+    j_slice: slice,
+    edge_blocks: tuple,
+    undirected: bool,
+) -> torch.Tensor:
+    """
+    Negative log-likelihood over all (i,j) in this block using variational means MU.
+    If i_slice == j_slice and undirected: only use upper triangle (i<j).
+    edge_blocks: (rows, cols) 0-based indices *relative to the block* for existing edges.
+    """
+    Zi = MU[i_slice]  # [bi, d]
+    Zj = MU[j_slice]  # [bj, d]
+    bi, bj = Zi.shape[0], Zj.shape[0]
 
-def vi_fit_single_graph(
+    # Build pair views to reuse model's logits if it expects [M,d]
+    zi = Zi[:, None, :].expand(bi, bj, -1).reshape(-1, Zi.shape[1])
+    zj = Zj[None, :, :].expand(bi, bj, -1).reshape(-1, Zj.shape[1])
+    logits = _pair_logits_with_means(base_model, zi, zj).reshape(bi, bj)
+
+    Y = torch.zeros((bi, bj), device=MU.device, dtype=logits.dtype)
+    rows, cols = edge_blocks
+    if rows.numel() > 0:
+        Y[rows, cols] = 1.0
+
+    if undirected and (i_slice.start == j_slice.start) and (i_slice.stop == j_slice.stop):
+        tri_mask = torch.ones((bi, bj), device=MU.device, dtype=torch.bool).triu(diagonal=1)
+        Y = Y[tri_mask]
+        logits = logits[tri_mask]
+
+    # NLL over all pairs in this block
+    nll = -(F.logsigmoid(logits) * Y + F.logsigmoid(-logits) * (1.0 - Y)).sum()
+    return nll
+
+
+def vi_fit_single_graph_full(
     edges_np: np.ndarray,
     N: int,
+    undirected: bool,
     device: torch.device,
     d: int = 16,
     epochs: int = 50,
     lr: float = 5e-2,
-    batch_size: int = 0,
+    block_size: int = 512,
     seed: int = 0,
-    undirected: bool = True,
+    kl_weight: float = 1.0,
 ) -> np.ndarray:
     """
-    Fit VI on a single graph by maximizing ELBO with Adam.
-    Returns Z_hat (posterior means mu) as np.ndarray [N,d].
+    Fit LatentPositionModel with **Gaussian VI** using block processing over all O(N^2) pairs.
+    ELBO = log-likelihood (using variational means) - kl_weight * KL[q(z)||p(z)].
+    Returns Z_hat (variational means mu) as np.ndarray [N,d].
     """
     set_all_seeds(seed)
-    model = LatentPositionModel_VI(N, d, device=device).to(device)
-    opt = torch.optim.Adam([p for p in model.parameters() if p.requires_grad], lr=lr)
+    # Base model supplies potential bias/scale/logit function; we optimize only VI params here.
+    base = LatentPositionModel(N=N, d=d).to(device)
+    # Variational parameters
+    mu = torch.nn.Parameter(0.01 * torch.randn(N, d, device=device))
+    log_sigma = torch.nn.Parameter(torch.full((N, d), -2.0, device=device))
+    opt = torch.optim.Adam([mu, log_sigma] + [p for p in base.parameters() if p.requires_grad], lr=lr)
 
-    edge_index = edges_to_edgeindex_2xE(edges_np, device=device, undirected=undirected)
+    # Prepare edge buckets per block
+    if undirected:
+        u = np.minimum(edges_np[:, 0], edges_np[:, 1])
+        v = np.maximum(edges_np[:, 0], edges_np[:, 1])
+        E = np.stack([u, v], axis=1)
+    else:
+        E = edges_np.copy()
+
+    def edge_block_map(N, block):
+        nb = (N + block - 1) // block
+        buckets = {}
+        for (a, b) in E:
+            i_blk = a // block
+            j_blk = b // block
+            key = (min(i_blk, j_blk), max(i_blk, j_blk)) if undirected else (i_blk, j_blk)
+            lst = buckets.get(key)
+            if lst is None:
+                buckets[key] = [(a, b)]
+            else:
+                lst.append((a, b))
+        return buckets, nb
+
+    buckets, nblocks = edge_block_map(N, block_size)
+
+    # Number of optimized blocks (upper triangle if undirected)
+    block_index_list = (
+        [(i, j) for i in range(nblocks) for j in range(i, nblocks)] if undirected
+        else [(i, j) for i in range(nblocks) for j in range(nblocks)]
+    )
+    num_blocks_effective = len(block_index_list)
 
     for _ in range(epochs):
-        model.train()
-        elbo = model.elbo(edge_index, batch_size=batch_size)
-        loss = -elbo  # maximize ELBO
-        opt.zero_grad(set_to_none=True)
-        loss.backward()
-        opt.step()
+        # Shuffle blocks for a bit of SGD flavor
+        random.shuffle(block_index_list)
 
-    return model.mu.detach().cpu().numpy()
+        for (ib, jb) in block_index_list:
+            i_start, i_end = ib * block_size, min((ib + 1) * block_size, N)
+            j_start, j_end = jb * block_size, min((jb + 1) * block_size, N)
+            if undirected and (jb < ib):
+                continue  # safety; though we only enumerated upper-tri
+
+            # Collect edges inside this block
+            pairs = buckets.get((min(ib, jb), max(ib, jb)) if undirected else (ib, jb), [])
+            if len(pairs) > 0:
+                arr = np.array(pairs, dtype=np.int64)
+                r = torch.from_numpy(arr[:, 0] - i_start).to(device)
+                c = torch.from_numpy(arr[:, 1] - j_start).to(device)
+            else:
+                r = torch.tensor([], dtype=torch.long, device=device)
+                c = torch.tensor([], dtype=torch.long, device=device)
+
+            nll = vi_block_nll(
+                base_model=base,
+                MU=mu,
+                i_slice=slice(i_start, i_end),
+                j_slice=slice(j_start, j_end),
+                edge_blocks=(r, c),
+                undirected=undirected,
+            )
+
+            # Add a fraction of KL each block to keep gradients well-scaled
+            kl = vi_kl(mu, log_sigma) * (kl_weight / num_blocks_effective)
+
+            loss = nll + kl  # minimize negative ELBO
+            opt.zero_grad(set_to_none=True)
+            loss.backward()
+            opt.step()
+
+    return mu.detach().cpu().numpy()
 
 
 # --------------------------- CLI ---------------------------
 
 def parse_args():
-    ap = argparse.ArgumentParser(description="Per-graph VI baseline (Gaussian VI) for latent positions.")
+    ap = argparse.ArgumentParser(description="Per-graph VI baseline (LatentPositionModel, Gaussian VI) for latent positions.")
     ap.add_argument("--setting_dir", required=True, help="Folder like sim_data_batch/A1")
     ap.add_argument("--out_dir", required=True, help="Directory to save Z_hat and metrics")
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     ap.add_argument("--seed", type=int, default=0)
 
-    # VI / optimization
-    ap.add_argument("--latent_dim", type=int, default=16)
+    # Model / optimization
+    ap.add_argument("--latent_dim", type=int, default=2)
     ap.add_argument("--epochs", type=int, default=500)
     ap.add_argument("--lr", type=float, default=1e-2)
-    ap.add_argument("--batch_size", type=int, default=0, help="Minibatch size over edges for ELBO (0=full-batch)")
+    ap.add_argument("--block_size", type=int, default=512, help="Pairwise VI block size")
+    ap.add_argument("--kl_weight", type=float, default=1.0, help="Weight on KL term in ELBO")
 
     # Metrics
     ap.add_argument("--gwd_nodes", type=int, default=2000, help="Max nodes used in GWD (subsample)")
@@ -230,10 +252,10 @@ def main():
     device = torch.device(args.device)
 
     os.makedirs(args.out_dir, exist_ok=True)
-    z_dir = os.path.join(args.out_dir, "Zhat_vi")
+    z_dir = os.path.join(args.out_dir, "Zhat_vi_full")
     os.makedirs(z_dir, exist_ok=True)
 
-    # *_test_* graphs to mirror other baselines
+    # *_test_* graphs to mirror exp1_mle.py
     graph_dirs = [g for g in list_graph_dirs(args.setting_dir) if "_test_" in os.path.basename(g)]
     if args.max_graphs and len(graph_dirs) > args.max_graphs:
         graph_dirs = graph_dirs[:args.max_graphs]
@@ -241,7 +263,7 @@ def main():
         raise SystemExit(f"No *_test_* graphs found in {args.setting_dir}")
 
     metrics = []
-    print(f"Running VI (Gaussian) on {len(graph_dirs)} test graphs. Saving Z_hat to: {z_dir}")
+    print(f"Running VI (LatentPositionModel, Gaussian VI) on {len(graph_dirs)} test graphs. Saving Z_hat to: {z_dir}")
 
     for gdir in graph_dirs:
         edges, N, directed, base = load_graph_dir(gdir)
@@ -252,17 +274,18 @@ def main():
             print(f"[skip] {base}: missing/size-mismatch true positions.")
             continue
 
-        # -------- Train VI per graph (single inference) --------
-        Z_hat = vi_fit_single_graph(
+        # -------- Train per graph (VI; single inference) --------
+        Z_hat = vi_fit_single_graph_full(
             edges_np=edges,
             N=N,
+            undirected=undirected,
             device=device,
             d=args.latent_dim,
             epochs=args.epochs,
             lr=args.lr,
-            batch_size=args.batch_size,
+            block_size=args.block_size,
             seed=args.seed,
-            undirected=undirected,
+            kl_weight=args.kl_weight,
         )
 
         if args.center:
@@ -272,7 +295,7 @@ def main():
         zpath = os.path.join(z_dir, f"{base}_Zhat_vi.npy")
         np.save(zpath, Z_hat)
 
-        # -------- Metrics (GWD and LP-RMSE) --------
+        # -------- Metrics (LP-RMSE and GWD) --------
         k = min(Z_true.shape[0], args.lp_nodes) if args.lp_nodes > 0 else Z_true.shape[0]
         idx = np.arange(Z_true.shape[0]) if k == Z_true.shape[0] else np.sort(
             np.random.default_rng(args.seed).choice(Z_true.shape[0], size=k, replace=False)
@@ -300,17 +323,11 @@ def main():
             "num_graphs": len(metrics),
             "mean_gwd": mean_gwd,
             "mean_lp_rmse": mean_lprmse,
-            "args": {
-                "latent_dim": args.latent_dim,
-                "epochs": args.epochs,
-                "lr": args.lr,
-                "batch_size": args.batch_size,
-            },
         }
         with open(os.path.join(args.out_dir, "test_metrics_vi.json"), "w") as f:
             json.dump({"summary": summary, "details": metrics}, f, indent=2)
-        print(f"\nSummary over {summary['num_graphs']} graphs: "
-              f"mean GWD={mean_gwd:.6f} | mean LP-RMSE={mean_lprmse:.6f}")
+        print(f"\nSummary over {summary['num_graphs']} graphs: mean GWD={mean_gwd:.6f} | mean LP-RMSE={mean_lprmse:.6f}")
+        print(f"Metrics saved to {os.path.join(args.out_dir, 'test_metrics_vi.json')}")
     else:
         print("No graphs evaluated.")
 
