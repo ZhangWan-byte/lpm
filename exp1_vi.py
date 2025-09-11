@@ -10,7 +10,7 @@ Per-graph VI baseline on batch datasets (same layout as exp1_train_batch / exp1_
 
 Usage:
   python exp1_vi.py --setting_dir ./sim_data_batch/A1_poly_feats \
-    --out_dir results_vi/A1_poly_feats --latent_dim 2 --epochs 500 --lr 1e-2 --center
+    --out_dir results_vi/A1_poly_feats --latent_dim 2 --epochs 500 --lr 1e-2
 """
 
 import os
@@ -300,7 +300,7 @@ def main():
         idx = np.arange(Z_true.shape[0]) if k == Z_true.shape[0] else np.sort(
             np.random.default_rng(args.seed).choice(Z_true.shape[0], size=k, replace=False)
         )
-        lp_rmse, Z_reduced = procrustes_rmse(Z_true[idx], Z_hat[idx], center=True, scale=False)
+        lp_rmse, Z_reduced = procrustes_rmse(Z_true[idx], Z_hat[idx], center=False, scale=False)
 
         gwd = gwd_from_positions(
             Z_true=Z_true, Z_hat=Z_reduced, max_nodes=args.gwd_nodes, seed=args.seed, center=args.center

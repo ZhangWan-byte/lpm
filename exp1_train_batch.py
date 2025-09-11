@@ -281,7 +281,7 @@ def compute_gwd_ignr(model: "RG_VAE",
         gws.append(float(gw2))
     return float(np.mean(gws))
 
-def procrustes_rmse(Z_true: np.ndarray, Z_hat: np.ndarray, center: bool = True, scale: bool = False) -> float:
+def procrustes_rmse(Z_true: np.ndarray, Z_hat: np.ndarray, center: bool = False, scale: bool = False) -> float:
     """Optional LP-RMSE for reference (uses orthogonal Procrustes)."""
     X = Z_true.astype(np.float64)
     Y = Z_hat.astype(np.float64)

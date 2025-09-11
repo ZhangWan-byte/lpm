@@ -2,6 +2,7 @@
 *.pth
 *.pt
 *.png
+figs_A1_poly_feats_grids/
 */__pycache__
 /__pycache__/
 /models/checkpoints
