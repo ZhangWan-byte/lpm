@@ -1,265 +1,186 @@
 # exp1_mle.py
 """
-Per-graph MLE baseline on batch datasets (same layout as exp1_train_batch / exp1_test_batch):
-- Finds all *_test_* graphs under --setting_dir
-- For each graph, fits LatentPositionModel by **full MLE (no negative sampling)**
-- Saves inferred LPs Z_hat as .npy and reports:
-    • Gromov–Wasserstein distance (GWD) vs. ground-truth positions  [NOTE: not squared]
-    • LP-RMSE via orthogonal Procrustes
+MLE baseline on *_test_* graphs:
+  • Fit LatentPositionModel via full MLE (no neg sampling).
+  • Save Z_hat and report GWD, LP-RMSE, AUC(1:1), AP(1:1), AP(all non-edges).
 
 Usage:
-  python exp1_mle.py --setting_dir ./sim_data_batch/A1_poly_feats \
-    --out_dir results_mle/A1_poly_feats --latent_dim 2 --epochs 500 --lr 1e-2
+  python exp1_mle.py --setting_dir sim_data_batch/A1 --out_dir results_mle/A1 \
+    --latent_dim 2 --epochs 500 --lr 1e-2 --ap_chunk_size 2000000
 """
 
-import os
-import json
-import argparse
-import numpy as np
-import torch
-import random
-import torch.nn.functional as F
-import ot  # POT
+import os, json, argparse, random, numpy as np, torch, torch.nn.functional as F
+from exp1_train_batch import list_graph_dirs, load_true_positions, procrustes_rmse
+from exp1_test_batch import gwd_from_positions, _all_non_edges_pairs  # reuse helpers
+from models.utils import load_graph_dir, negative_sampling, auc_ap
 
-# Borrow helpers to match IO and metrics used elsewhere
-from exp1_train_batch import (
-    list_graph_dirs,
-    load_true_positions,
-    procrustes_rmse,
-)
-from models.utils import load_graph_dir
-from exp1_test_batch import gwd_from_positions
-
-# Use the LatentPositionModel definition provided in the repo
+# Try both names used in the repo for the baseline model
 try:
     from mle_arxiv_ogb import LatentPositionModel  # type: ignore
 except Exception:
     from mle_arxiv_ogb_C3 import LatentPositionModel  # type: ignore
 
 
-# --------------------------- Utils ---------------------------
+# --------------------------- small utils ---------------------------
 
-def set_all_seeds(seed: int):
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(seed)
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
+def set_all_seeds(seed:int):
+    random.seed(seed); np.random.seed(seed); torch.manual_seed(seed)
+    if torch.cuda.is_available(): torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True; torch.backends.cudnn.benchmark = False
 
 
-def _get_embedding_parameter(model: torch.nn.Module, N: int, d: int, device: torch.device) -> torch.nn.Parameter:
-    """
-    Be robust to variations: prefer model.mu (as in LatentPositionModel),
-    otherwise fall back to model.Z (if present) or register our own.
-    """
-    emb = None
-    if hasattr(model, "mu") and isinstance(getattr(model, "mu"), torch.Tensor):
-        emb = getattr(model, "mu")
-        if not isinstance(emb, torch.nn.Parameter):
-            emb = torch.nn.Parameter(emb.to(device))
-            setattr(model, "mu", emb)
-    elif hasattr(model, "Z") and isinstance(getattr(model, "Z"), torch.Tensor):
-        emb = getattr(model, "Z")
-        if not isinstance(emb, torch.nn.Parameter):
-            emb = torch.nn.Parameter(emb.to(device))
-            setattr(model, "Z", emb)
+def _get_Z_param(model, N, d, device):
+    if hasattr(model, "mu"): 
+        Z = getattr(model, "mu")
+        if not isinstance(Z, torch.nn.Parameter):
+            Z = torch.nn.Parameter(Z.to(device)); setattr(model, "mu", Z)
+    elif hasattr(model, "Z"):
+        Z = getattr(model, "Z")
+        if not isinstance(Z, torch.nn.Parameter):
+            Z = torch.nn.Parameter(Z.to(device)); setattr(model, "Z", Z)
     else:
-        emb = torch.nn.Parameter(0.01 * torch.randn(N, d, device=device))
-        setattr(model, "mu", emb)
-    emb.requires_grad_(True)
-    return emb
+        Z = torch.nn.Parameter(0.01 * torch.randn(N, d, device=device)); setattr(model, "mu", Z)
+    Z.requires_grad_(True); return Z
 
 
 def _pair_logits(model, zi: torch.Tensor, zj: torch.Tensor) -> torch.Tensor:
-    """
-    Use the model's pairwise logits if available; otherwise default to -||zi - zj||^2
-    with optional bias/scale if detected on the model.
-    """
+    # Prefer model.logits(zi,zj); else fallback to -alpha||zi-zj||^2 + bias
     if hasattr(model, "logits"):
-        try:
-            return model.logits(zi, zj)
-        except TypeError:
-            pass  # fall back
-    # generic fallback: bias - alpha * ||zi - zj||^2 if attributes exist
+        try: return model.logits(zi, zj)
+        except TypeError: pass
     d2 = torch.sum((zi - zj) ** 2, dim=-1)
-    bias = getattr(model, "bias", None)
-    log_alpha = getattr(model, "log_alpha", None)
-    if bias is None and log_alpha is None:
-        return -d2
-    b = bias if isinstance(bias, torch.Tensor) else torch.tensor(0.0, device=d2.device)
-    if isinstance(log_alpha, torch.Tensor):
-        alpha = F.softplus(log_alpha) + 1e-4
-    else:
-        alpha = torch.tensor(1.0, device=d2.device)
-    return b - alpha * d2
+    b = getattr(model, "bias", None); la = getattr(model, "log_alpha", None)
+    b = b if isinstance(b, torch.Tensor) else torch.tensor(0.0, device=d2.device)
+    a = (F.softplus(la) + 1e-4) if isinstance(la, torch.Tensor) else torch.tensor(1.0, device=d2.device)
+    return b - a * d2
 
 
-def full_mle_loss_block(
-    model,
-    Z: torch.Tensor,
-    i_slice: slice,
-    j_slice: slice,
-    edge_blocks: tuple,
-    undirected: bool,
-) -> torch.Tensor:
-    """
-    Compute negative log-likelihood for the (i_slice, j_slice) block.
-    If i_slice == j_slice and undirected: only use upper triangle (i<j).
-    edge_blocks: (rows, cols) tensor indices (relative to block) for existing edges within the block.
-    """
-    Zi = Z[i_slice]  # [bi, d]
-    Zj = Z[j_slice]  # [bj, d]
-    bi, bj = Zi.shape[0], Zj.shape[0]
-
-    # compute pairwise logits for block
-    # broadcast to bi*bj pairs efficiently
-    # (Zi[:,None,:] - Zj[None,:,:])^2 -> sum over dim
-    # We'll build zi and zj "pairs" views to reuse model logits if it expects [M,d]
-    zi = Zi[:, None, :].expand(bi, bj, -1).reshape(-1, Zi.shape[1])
-    zj = Zj[None, :, :].expand(bi, bj, -1).reshape(-1, Zj.shape[1])
-    logits = _pair_logits(model, zi, zj).reshape(bi, bj)
-
-    # labels matrix Y in this block
-    Y = torch.zeros((bi, bj), device=Z.device, dtype=logits.dtype)
-    rows, cols = edge_blocks
-    if rows.numel() > 0:
-        Y[rows, cols] = 1.0
-
-    # mask for undirected diagonal block: use upper triangle only (i<j)
-    if undirected and (i_slice.start == j_slice.start) and (i_slice.stop == j_slice.stop):
-        tri_mask = torch.ones((bi, bj), device=Z.device, dtype=torch.bool).triu(diagonal=1)
-        Y = Y[tri_mask]
-        logits = logits[tri_mask]
-
-    # Bernoulli log-likelihood over all pairs in this block
-    # sum [ Y * log(sigmoid(l)) + (1-Y) * log(sigmoid(-l)) ]
-    nll = -(F.logsigmoid(logits) * Y + F.logsigmoid(-logits) * (1.0 - Y)).sum()
-    return nll
+def _pair_scores_from_pairs(model, Z: torch.Tensor, pairs: torch.Tensor) -> np.ndarray:
+    with torch.no_grad():
+        zi = Z[pairs[:, 0]]; zj = Z[pairs[:, 1]]
+        return torch.sigmoid(_pair_logits(model, zi, zj)).detach().cpu().numpy()
 
 
-def mle_fit_single_graph_full(
-    edges_np: np.ndarray,
-    N: int,
-    undirected: bool,
-    device: torch.device,
-    d: int = 16,
-    epochs: int = 50,
-    lr: float = 5e-2,
-    block_size: int = 512,
-    seed: int = 0,
-) -> np.ndarray:
-    """
-    Fit LatentPositionModel on a single graph using **full MLE** over all (i,j) pairs.
-    No negative sampling. Uses block processing for O(N^2) pairs.
-    Returns Z_hat as np.ndarray [N,d].
-    """
+# --------------------------- full MLE (blockwise) ---------------------------
+
+def mle_fit_full(edges_np: np.ndarray, N:int, undirected:bool, device, d:int, epochs:int, lr:float, block:int, seed:int):
     set_all_seeds(seed)
     model = LatentPositionModel(N=N, d=d).to(device)
-    Zparam = _get_embedding_parameter(model, N, d, device)
-
-    # Optimize all trainable parameters of the model (embeddings + any bias/scale)
+    Z = _get_Z_param(model, N, d, device)
     params = [p for p in model.parameters() if p.requires_grad]
-    if Zparam not in params:
-        params.append(Zparam)
+    if Z not in params: params.append(Z)
     opt = torch.optim.Adam(params, lr=lr)
 
-    # Build edge lookup per block for fast labeling
-    # create directed edge list for convenience
+    # Edge buckets per (block,block)
+    E = edges_np.copy()
     if undirected:
-        # normalize to i<j to avoid duplicates
-        u = np.minimum(edges_np[:, 0], edges_np[:, 1])
-        v = np.maximum(edges_np[:, 0], edges_np[:, 1])
-        E = np.stack([u, v], axis=1)
-    else:
-        E = edges_np.copy()
-    # bucket edges by block indices to avoid scanning the full edge list each step
-    def edge_block_map(N, block):
-        nb = (N + block - 1) // block
-        buckets = {}
-        for (a, b) in E:
-            i_blk = a // block
-            j_blk = b // block if not undirected else b // block
-            key = (min(i_blk, j_blk), max(i_blk, j_blk)) if undirected else (i_blk, j_blk)
-            lst = buckets.get(key)
-            if lst is None:
-                buckets[key] = [(a, b)]
-            else:
-                lst.append((a, b))
-        return buckets, nb
-
-    buckets, nblocks = edge_block_map(N, block_size)
+        u, v = np.minimum(E[:,0], E[:,1]), np.maximum(E[:,0], E[:,1]); E = np.stack([u, v], 1)
+    nb = (N + block - 1) // block
+    buckets = {}
+    for a, b in E:
+        ib, jb = a // block, b // block
+        key = (min(ib, jb), max(ib, jb)) if undirected else (ib, jb)
+        (buckets.setdefault(key, [])).append((a, b))
 
     for _ in range(epochs):
-        model.train()
-        # optional: shuffle block order for a bit of SGD flavor
-        block_order = [(i, j) for i in range(nblocks) for j in range(i, nblocks)] if undirected else \
-                      [(i, j) for i in range(nblocks) for j in range(nblocks)]
-        random.shuffle(block_order)
+        # Block order
+        order = ([(i, j) for i in range(nb) for j in range(i, nb)] if undirected
+                 else [(i, j) for i in range(nb) for j in range(nb)])
+        random.shuffle(order)
 
-        total_nll = 0.0
-        for (ib, jb) in block_order:
-            i_start, i_end = ib * block_size, min((ib + 1) * block_size, N)
-            j_start, j_end = jb * block_size, min((jb + 1) * block_size, N)
-            if undirected and (jb < ib):
-                continue  # only upper (including diagonal) blocks
+        for ib, jb in order:
+            if undirected and jb < ib: continue
+            i0, i1 = ib*block, min((ib+1)*block, N)
+            j0, j1 = jb*block, min((jb+1)*block, N)
+            Zi, Zj = Z[i0:i1], Z[j0:j1]
+            bi, bj = Zi.size(0), Zj.size(0)
 
-            # collect edges inside this block
+            zi = Zi[:, None, :].expand(bi, bj, -1).reshape(-1, Zi.size(1))
+            zj = Zj[None, :, :].expand(bi, bj, -1).reshape(-1, Zj.size(1))
+            logits = _pair_logits(model, zi, zj).reshape(bi, bj)
+
+            Y = torch.zeros((bi, bj), device=device, dtype=logits.dtype)
             pairs = buckets.get((min(ib, jb), max(ib, jb)) if undirected else (ib, jb), [])
-            if len(pairs) > 0:
-                arr = np.array(pairs, dtype=np.int64)
-                # convert to block-local indices (rows & cols)
-                r = torch.from_numpy(arr[:, 0] - i_start).to(device)
-                c = torch.from_numpy(arr[:, 1] - j_start).to(device)
-            else:
-                r = torch.tensor([], dtype=torch.long, device=device)
-                c = torch.tensor([], dtype=torch.long, device=device)
+            if pairs:
+                arr = np.asarray(pairs, dtype=np.int64)
+                Y[torch.from_numpy(arr[:,0]-i0).to(device), torch.from_numpy(arr[:,1]-j0).to(device)] = 1.0
+            if undirected and ib == jb:
+                tri = torch.ones((bi, bj), dtype=torch.bool, device=device).triu(1)
+                logits, Y = logits[tri], Y[tri]
 
-            nll = full_mle_loss_block(
-                model,
-                Zparam,
-                slice(i_start, i_end),
-                slice(j_start, j_end),
-                (r, c),
-                undirected=undirected,
-            )
+            nll = -(F.logsigmoid(logits)*Y + F.logsigmoid(-logits)*(1-Y)).sum()
+            opt.zero_grad(set_to_none=True); nll.backward(); opt.step()
 
-            opt.zero_grad(set_to_none=True)
-            nll.backward()
-            opt.step()
-            total_nll += float(nll.detach().cpu().item())
-
-        # (optional) print per-epoch NLL for debugging
-        # print(f"Epoch nll: {total_nll:.3f}")
-
-    return Zparam.detach().cpu().numpy()
+    return model, Z.detach().cpu().numpy()
 
 
-# --------------------------- CLI ---------------------------
+# --------------------------- metrics: AUC/AP ---------------------------
+
+def kernel_metrics(Z_hat: np.ndarray, edges: np.ndarray, N:int, undirected:bool, device, ap_chunk_size:int=2_000_000):
+    model_eval = LatentPositionModel(N=N, d=Z_hat.shape[1]).to(device)  # for logits structure
+    Zt = torch.from_numpy(Z_hat).float().to(device)
+    pos = torch.from_numpy(edges.astype(np.int64)).long().to(device)
+    n_pos = pos.size(0)
+    # 1:1 sampled negatives
+    exclude = set((int(a), int(b)) for a, b in edges)
+    neg_np = negative_sampling(N, max(1, int(n_pos)), exclude=exclude, undirected=undirected, device=device)
+    neg = torch.from_numpy(neg_np).long().to(device)
+
+    pos_scores = _pair_scores_from_pairs(model_eval, Zt, pos)
+    neg_scores = _pair_scores_from_pairs(model_eval, Zt, neg)
+    scores_11 = np.concatenate([pos_scores, neg_scores], 0)
+    labels_11 = np.concatenate([np.ones_like(pos_scores, dtype=np.int32),
+                                np.zeros_like(neg_scores, dtype=np.int32)], 0)
+    auc_11, ap_11 = auc_ap(scores_11, labels_11)
+
+    # AP over all non-edges
+    all_neg_np = _all_non_edges_pairs(N, edges, undirected=undirected)
+    neg_all_scores = []
+    for s in range(0, all_neg_np.shape[0], ap_chunk_size):
+        e = min(s + ap_chunk_size, all_neg_np.shape[0])
+        chunk = torch.from_numpy(all_neg_np[s:e]).long().to(device)
+        neg_all_scores.append(_pair_scores_from_pairs(model_eval, Zt, chunk))
+    neg_all_scores = np.concatenate(neg_all_scores, 0) if neg_all_scores else np.empty((0,), dtype=np.float32)
+
+    scores_all = np.concatenate([pos_scores, neg_all_scores], 0)
+    labels_all = np.concatenate([np.ones_like(pos_scores, dtype=np.int32),
+                                 np.zeros_like(neg_all_scores, dtype=np.int32)], 0)
+    ap_all = auc_ap(scores_all, labels_all)[1]
+
+    return {
+        "auc_1to1": float(auc_11),
+        "ap_1to1": float(ap_11),
+        "ap_all": float(ap_all),
+        "n_pos": int(n_pos),
+        "n_neg_1to1": int(neg.size(0)),
+        "n_neg_all": int(all_neg_np.shape[0]),
+    }
+
+
+# --------------------------- CLI & main ---------------------------
 
 def parse_args():
-    ap = argparse.ArgumentParser(description="Per-graph MLE baseline (LatentPositionModel, full MLE) for latent positions.")
-    ap.add_argument("--setting_dir", required=True, help="Folder like sim_data_batch/A1")
-    ap.add_argument("--out_dir", required=True, help="Directory to save Z_hat and metrics")
+    ap = argparse.ArgumentParser("MLE baseline with concise metrics")
+    ap.add_argument("--setting_dir", required=True)
+    ap.add_argument("--out_dir", required=True)
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     ap.add_argument("--seed", type=int, default=0)
 
-    # Model / optimization
+    # model/optim
     ap.add_argument("--latent_dim", type=int, default=2)
     ap.add_argument("--epochs", type=int, default=500)
     ap.add_argument("--lr", type=float, default=1e-2)
-    ap.add_argument("--block_size", type=int, default=512, help="Pairwise MLE block size")
-    # Metrics
-    ap.add_argument("--gwd_nodes", type=int, default=2000, help="Max nodes used in GWD (subsample)")
-    ap.add_argument("--lp_nodes", type=int, default=5000, help="Max nodes used in LP-RMSE (subsample)")
-    ap.add_argument("--center", action="store_true", help="Center embeddings before metrics")
-    # Control
-    ap.add_argument("--max_graphs", type=int, default=0, help="0=all test graphs, else limit")
+    ap.add_argument("--block_size", type=int, default=512)
+
+    # metrics
+    ap.add_argument("--gwd_nodes", type=int, default=2000)
+    ap.add_argument("--lp_nodes", type=int, default=5000)
+    ap.add_argument("--center", action="store_true")
+    ap.add_argument("--ap_chunk_size", type=int, default=2_000_000)
+
+    ap.add_argument("--max_graphs", type=int, default=0)
     return ap.parse_args()
 
-
-# --------------------------- Main ---------------------------
 
 def main():
     args = parse_args()
@@ -267,81 +188,61 @@ def main():
     device = torch.device(args.device)
 
     os.makedirs(args.out_dir, exist_ok=True)
-    z_dir = os.path.join(args.out_dir, "Zhat_mle_full")
-    os.makedirs(z_dir, exist_ok=True)
+    z_dir = os.path.join(args.out_dir, "Zhat_mle_full"); os.makedirs(z_dir, exist_ok=True)
 
-    # *_test_* graphs to mirror exp1_test_batch
     graph_dirs = [g for g in list_graph_dirs(args.setting_dir) if "_test_" in os.path.basename(g)]
     if args.max_graphs and len(graph_dirs) > args.max_graphs:
         graph_dirs = graph_dirs[:args.max_graphs]
-    if not graph_dirs:
-        raise SystemExit(f"No *_test_* graphs found in {args.setting_dir}")
+    if not graph_dirs: raise SystemExit(f"No *_test_* graphs found in {args.setting_dir}")
 
     metrics = []
-    print(f"Running MLE (LatentPositionModel, full MLE) on {len(graph_dirs)} test graphs. Saving Z_hat to: {z_dir}")
-
     for gdir in graph_dirs:
-        edges, N, directed, base = load_graph_dir(gdir)
-        undirected = not directed
-
+        edges, N, directed, base = load_graph_dir(gdir); undirected = not directed
         Z_true = load_true_positions(gdir)
         if Z_true is None or Z_true.shape[0] != N:
-            print(f"[skip] {base}: missing/size-mismatch true positions.")
-            continue
+            print(f"[skip] {base}: missing/size-mismatch true positions."); continue
 
-        # -------- Train per graph (full MLE; single inference) --------
-        Z_hat = mle_fit_single_graph_full(
-            edges_np=edges,
-            N=N,
-            undirected=undirected,
-            device=device,
-            d=args.latent_dim,
-            epochs=args.epochs,
-            lr=args.lr,
-            block_size=args.block_size,
-            seed=args.seed,
-        )
+        model, Z_hat = mle_fit_full(edges, N, undirected, device, args.latent_dim, args.epochs, args.lr, args.block_size, args.seed)
+        if args.center: Z_hat = Z_hat - Z_hat.mean(0, keepdims=True)
+        zpath = os.path.join(z_dir, f"{base}_Zhat_mle.npy"); np.save(zpath, Z_hat)
 
-        if args.center:
-            Z_hat = Z_hat - Z_hat.mean(0, keepdims=True)
-
-        # Save LPs
-        zpath = os.path.join(z_dir, f"{base}_Zhat_mle.npy")
-        np.save(zpath, Z_hat)
-
-        # -------- Metrics (LP-RMSE and GWD) --------
+        # LP-RMSE (subsample if needed)
         k = min(Z_true.shape[0], args.lp_nodes) if args.lp_nodes > 0 else Z_true.shape[0]
-        idx = np.arange(Z_true.shape[0]) if k == Z_true.shape[0] else np.sort(
-            np.random.default_rng(args.seed).choice(Z_true.shape[0], size=k, replace=False)
-        )
-        lp_rmse, Z_reduced = procrustes_rmse(Z_true[idx], Z_hat[idx], center=False, scale=False)
+        idx = np.arange(Z_true.shape[0]) if k==Z_true.shape[0] else np.sort(np.random.default_rng(args.seed).choice(Z_true.shape[0], k, replace=False))
+        lp_rmse, Z_red = procrustes_rmse(Z_true[idx], Z_hat[idx], center=False, scale=False)
 
-        gwd = gwd_from_positions(
-            Z_true=Z_true, Z_hat=Z_reduced, max_nodes=args.gwd_nodes, seed=args.seed, center=args.center
-        )
+        gwd = gwd_from_positions(Z_true, Z_red, max_nodes=args.gwd_nodes, seed=args.seed, center=args.center)
+        kern = kernel_metrics(Z_hat, np.asarray(edges, dtype=np.int64), N, undirected, device, args.ap_chunk_size)
 
-        print(f"{base}: GWD={gwd:.6f} | LP-RMSE={lp_rmse:.6f} | Z_hat={zpath}")
+        print(f"{base}: GWD={gwd:.6f} | LP-RMSE={lp_rmse:.6f} | "
+              f"AUC(1:1)={kern['auc_1to1']:.6f} | AP(1:1)={kern['ap_1to1']:.6f} | AP(all)={kern['ap_all']:.6f} "
+              f"| Z_hat={zpath} (pos={kern['n_pos']}, neg_1to1={kern['n_neg_1to1']}, neg_all={kern['n_neg_all']})")
+
         metrics.append({
-            "graph": base,
-            "n_nodes": int(N),
-            "gwd": float(gwd),
-            "lp_rmse": float(lp_rmse),
-            "zhat_path": zpath,
+            "graph": base, "n_nodes": int(N),
+            "gwd": float(gwd), "lp_rmse": float(lp_rmse),
+            "auc_1to1": float(kern["auc_1to1"]), "ap_1to1": float(kern["ap_1to1"]),
+            "ap_all": float(kern["ap_all"]), "n_pos": int(kern["n_pos"]),
+            "n_neg_1to1": int(kern["n_neg_1to1"]), "n_neg_all": int(kern["n_neg_all"]),
+            "zhat_path": zpath
         })
 
-    # -------- Summary --------
     if metrics:
-        mean_gwd = float(np.mean([m["gwd"] for m in metrics]))
-        mean_lprmse = float(np.mean([m["lp_rmse"] for m in metrics]))
-        summary = {
+        out = {
             "num_graphs": len(metrics),
-            "mean_gwd": mean_gwd,
-            "mean_lp_rmse": mean_lprmse,
+            "mean_gwd": float(np.mean([m["gwd"] for m in metrics])),
+            "mean_lp_rmse": float(np.mean([m["lp_rmse"] for m in metrics])),
+            "mean_auc_1to1": float(np.mean([m["auc_1to1"] for m in metrics])),
+            "mean_ap_1to1": float(np.mean([m["ap_1to1"] for m in metrics])),
+            "mean_ap_all": float(np.mean([m["ap_all"] for m in metrics])),
+            "details": metrics
         }
-        with open(os.path.join(args.out_dir, "test_metrics_mle.json"), "w") as f:
-            json.dump({"summary": summary, "details": metrics}, f, indent=2)
-        print(f"\nSummary over {summary['num_graphs']} graphs: mean GWD={mean_gwd:.6f} | mean LP-RMSE={mean_lprmse:.6f}")
-        print(f"Metrics saved to {os.path.join(args.out_dir, 'test_metrics_mle.json')}")
+        with open(os.path.join(args.out_dir, "test_metrics_mle.json"), "w") as f: json.dump(out, f, indent=2)
+        print(f"\nSummary over {out['num_graphs']} graphs: "
+              f"mean GWD={out['mean_gwd']:.6f} | mean LP-RMSE={out['mean_lp_rmse']:.6f} | "
+              f"mean AUC(1:1)={out['mean_auc_1to1']:.6f} | mean AP(1:1)={out['mean_ap_1to1']:.6f} | "
+              f"mean AP(all)={out['mean_ap_all']:.6f}")
+        print(f"Saved metrics to {os.path.join(args.out_dir, 'test_metrics_mle.json')}")
     else:
         print("No graphs evaluated.")
 

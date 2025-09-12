@@ -1,11 +1,18 @@
 # exp1_test_batch.py
 """
 Infer latent positions ONCE per test graph, save them next to the checkpoint,
-then compute (i) GWD using POT on the saved Z_hat and (ii) LP-RSE (RMSE after Procrustes).
+then compute:
+  (i)  GWD using POT on the saved Z_hat,
+  (ii) LP-RSE (RMSE after Procrustes),
+  (iii) Kernel reconstruction metrics:
+       - AUC-ROC with pos:neg = 1:1 (sampled)
+       - AP with pos:neg = 1:1 (sampled)
+       - AP over ALL non-edges (extreme case)
 
 Usage:
   python exp1_test_batch.py --setting_dir sim_data_batch/A1 --ckpt runs/A1/ckpt.pt \
-    --model RG-G-VAE --latent_dim 16
+    --model RG-G-VAE --latent_dim 16 \
+    --ap_chunk_size 2000000
 """
 
 import os, json, argparse, numpy as np, torch, random
@@ -16,7 +23,7 @@ from exp1_train_batch import (
     list_graph_dirs, load_node_features, load_true_positions, procrustes_rmse,
     _posterior_sample_latents, build_model, _subsample_indices, _pairwise_euclidean
 )
-from models.utils import load_graph_dir, build_sparse_adj
+from models.utils import load_graph_dir, build_sparse_adj, negative_sampling, auc_ap
 
 
 def set_all_seeds(seed:int):
@@ -38,9 +45,118 @@ def gwd_from_positions(Z_true: np.ndarray, Z_hat: np.ndarray, max_nodes:int=2000
         gw2 = ot.gromov_wasserstein2(Ct, Ch, p, q, loss_fun='square_loss', max_iter=max_iter, tol=tol, verbose=False)
     except AttributeError:
         gw2 = ot.gromov.gromov_wasserstein2(Ct, Ch, p, q, loss_fun='square_loss', max_iter=max_iter, tol=tol, verbose=False)
-    # numerical guard in case of tiny negative due to round-off
     return float(np.sqrt(max(gw2, 0.0)))
 
+def _edges_to_exclude_set(edges: np.ndarray) -> set:
+    """Make a set of pairs (i,j) to exclude when sampling negatives."""
+    return set((int(a), int(b)) for a, b in edges)
+
+def _all_non_edges_pairs(N: int, edges: np.ndarray, undirected: bool) -> np.ndarray:
+    """
+    Enumerate ALL non-edge pairs.
+    - For undirected graphs: return unordered pairs (i<j), excluding existing edges (treated as unordered).
+    - For directed graphs: return ordered pairs (i,j), i!=j, excluding existing directed edges.
+    NOTE: This can be very large (O(N^2)). Use with care.
+    """
+    if undirected:
+        M = np.ones((N, N), dtype=bool)
+        np.fill_diagonal(M, False)
+        for a, b in edges:
+            i, j = int(a), int(b)
+            if i == j:
+                M[i, j] = False
+            else:
+                ii, jj = (i, j) if i < j else (j, i)
+                M[ii, jj] = False
+                M[jj, ii] = False
+        iu, ju = np.triu_indices(N, k=1)
+        keep = M[iu, ju]
+        return np.stack([iu[keep], ju[keep]], axis=1).astype(np.int64)
+    else:
+        M = np.ones((N, N), dtype=bool)
+        np.fill_diagonal(M, False)
+        for a, b in edges:
+            M[int(a), int(b)] = False
+        ii, jj = np.where(M)
+        return np.stack([ii, jj], axis=1).astype(np.int64)
+
+
+# ------------------------------- Concise kernel metrics -------------------------------
+
+def _pair_scores(model, z_t: torch.Tensor, pairs: torch.Tensor) -> np.ndarray:
+    """Sigmoid scores for (i,j) pairs as numpy."""
+    with torch.no_grad():
+        logits = model.pair_logits(z_t, pairs)
+        return torch.sigmoid(logits).detach().cpu().numpy()
+
+
+def kernel_metrics_with_Z(
+    model,
+    Z_hat: np.ndarray,
+    edges: np.ndarray,
+    N: int,
+    undirected: bool,
+    device: torch.device,
+    ap_chunk_size: int = 2_000_000,
+) -> dict:
+    """
+    Compute kernel reconstruction metrics given fixed node embeddings Z_hat.
+
+    Reports:
+      - AUC-ROC with pos:neg = 1:1 (sampled)
+      - AP with pos:neg = 1:1 (sampled)
+      - AP over ALL non-edges
+    """
+    z_t = torch.from_numpy(Z_hat).float().to(device)
+    pos = torch.from_numpy(edges.astype(np.int64)).long().to(device)
+    n_pos = pos.size(0)
+    exclude = _edges_to_exclude_set(edges)
+
+    # ----- AUC & AP with 1:1 sampled negatives -----
+    n_neg_sampled = max(1, int(n_pos))
+    neg_np = negative_sampling(N, n_neg_sampled, exclude=exclude, undirected=undirected, device=device)
+    neg = torch.from_numpy(neg_np).long().to(device)
+
+    pos_scores = _pair_scores(model, z_t, pos)
+    neg_scores = _pair_scores(model, z_t, neg)
+    scores_11 = np.concatenate([pos_scores, neg_scores], axis=0)
+    labels_11 = np.concatenate(
+        [np.ones(pos_scores.shape[0], dtype=np.int32),
+         np.zeros(neg_scores.shape[0], dtype=np.int32)],
+        axis=0
+    )
+    auc_11, ap_11 = auc_ap(scores_11, labels_11)
+
+    # ----- AP over ALL non-edges -----
+    all_neg_np = _all_non_edges_pairs(N, edges, undirected=undirected)
+    # chunked scoring for memory friendliness
+    neg_all_scores_list = []
+    total = all_neg_np.shape[0]
+    for s in range(0, total, ap_chunk_size):
+        e = min(s + ap_chunk_size, total)
+        chunk = torch.from_numpy(all_neg_np[s:e]).long().to(device)
+        neg_all_scores_list.append(_pair_scores(model, z_t, chunk))
+    neg_all_scores = np.concatenate(neg_all_scores_list, axis=0) if neg_all_scores_list else np.empty((0,), dtype=np.float32)
+
+    scores_all = np.concatenate([pos_scores, neg_all_scores], axis=0)
+    labels_all = np.concatenate(
+        [np.ones(pos_scores.shape[0], dtype=np.int32),
+         np.zeros(neg_all_scores.shape[0], dtype=np.int32)],
+        axis=0
+    )
+    ap_all = auc_ap(scores_all, labels_all)[1]
+
+    return {
+        "auc": float(auc_11),
+        "ap_11": float(ap_11),
+        "ap_all": float(ap_all),
+        "n_pos": int(n_pos),
+        "n_neg_11": int(n_neg_sampled),
+        "n_neg_all": int(all_neg_np.shape[0]),
+    }
+
+
+# --------------------------------------------------------------------------------------
 
 def parse_args():
     ap = argparse.ArgumentParser()
@@ -65,6 +181,11 @@ def parse_args():
     ap.add_argument("--gwd_nodes", type=int, default=2000)
     ap.add_argument("--lp_nodes", type=int, default=5000)
     ap.add_argument("--max_graphs", type=int, default=0)
+
+    # memory control for AP over all non-edges
+    ap.add_argument("--ap_chunk_size", type=int, default=2_000_000,
+                    help="Chunk size when scoring all non-edges for AP.")
+
     return ap.parse_args()
 
 
@@ -92,6 +213,7 @@ def main():
     print(f"Evaluating {len(graph_dirs)} test graphs; saving Z_hat to: {ckpt_dir}")
     for gdir in graph_dirs:
         edges, N, directed, base = load_graph_dir(gdir)
+        undirected = not directed
         A = build_sparse_adj(N, edges, directed=directed, device=device, self_loops=True)
         X = torch.from_numpy(load_node_features(gdir, standardize=True)).float().to(device)
         Z_true = load_true_positions(gdir)
@@ -118,16 +240,53 @@ def main():
         # ---- metrics reusing the saved inference ----
         gwd = gwd_from_positions(Z_true, Z_hat=Z_reduced, max_nodes=args.gwd_nodes, seed=args.seed, center=args.center)
 
-        print(f"{base}: GWD={gwd:.6f} | LP-RMSE={rmse:.6f} | Z_hat={zpath}")
-        metrics.append({"graph": base, "n_nodes": int(N), "gwd": float(gwd), "lp_rmse": float(rmse), "zhat_path": zpath})
+        # ---- kernel reconstruction metrics ----
+        kern = kernel_metrics_with_Z(
+            model, Z_hat, edges=np.asarray(edges, dtype=np.int64), N=N, undirected=undirected,
+            device=device, ap_chunk_size=args.ap_chunk_size
+        )
+
+        print(
+            f"{base}: GWD={gwd:.6f} | LP-RMSE={rmse:.6f} | "
+            f"AUC(1:1)={kern['auc']:.6f} | AP(1:1)={kern['ap_11']:.6f} | AP(all)={kern['ap_all']:.6f} "
+            f"| Z_hat={zpath} (pos={kern['n_pos']}, neg_1to1={kern['n_neg_11']}, neg_all={kern['n_neg_all']})"
+        )
+        metrics.append({
+            "graph": base,
+            "n_nodes": int(N),
+            "gwd": float(gwd),
+            "lp_rmse": float(rmse),
+            "auc_1to1": float(kern["auc"]),
+            "ap_1to1": float(kern["ap_11"]),
+            "ap_all": float(kern["ap_all"]),
+            "n_pos": int(kern["n_pos"]),
+            "n_neg_1to1": int(kern["n_neg_11"]),
+            "n_neg_all": int(kern["n_neg_all"]),
+            "zhat_path": zpath
+        })
 
     # summary
     if metrics:
-        mean_gwd = float(np.mean([m["gwd"] for m in metrics]))
+        mean_gwd   = float(np.mean([m["gwd"] for m in metrics]))
         mean_rmse  = float(np.mean([m["lp_rmse"] for m in metrics]))
-        print(f"\nSummary over {len(metrics)} graphs: mean GWD={mean_gwd:.6f} | mean LP-RMSE={mean_rmse:.6f}")
+        mean_auc11 = float(np.mean([m["auc_1to1"] for m in metrics]))
+        mean_ap11  = float(np.mean([m["ap_1to1"] for m in metrics]))
+        mean_apall = float(np.mean([m["ap_all"] for m in metrics]))
+        print(
+            f"\nSummary over {len(metrics)} graphs: "
+            f"mean GWD={mean_gwd:.6f} | mean LP-RMSE={mean_rmse:.6f} | "
+            f"mean AUC(1:1)={mean_auc11:.6f} | mean AP(1:1)={mean_ap11:.6f} | mean AP(all)={mean_apall:.6f}"
+        )
+        out = {
+            "mean_gwd": mean_gwd,
+            "mean_lp_rmse": mean_rmse,
+            "mean_auc_1to1": mean_auc11,
+            "mean_ap_1to1": mean_ap11,
+            "mean_ap_all": mean_apall,
+            "details": metrics
+        }
         with open(os.path.join(ckpt_dir, "test_metrics.json"), "w") as f:
-            json.dump({"mean_gwd": mean_gwd, "mean_lp_rmse": mean_rmse, "details": metrics}, f, indent=2)
+            json.dump(out, f, indent=2)
     else:
         print("No graphs evaluated.")
 

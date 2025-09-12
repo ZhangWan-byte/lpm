@@ -113,7 +113,7 @@ python exp1_vi.py --setting_dir ./sim_data_batch/A1_poly_feats --out_dir ./resul
 USVT
 
 ```bash
-python exp1_usvt.py --setting_dir ./sim_data_batch/A1_poly_feats --out_dir ./results_mle/A1_poly_feats_D2 --d_max 2
+python exp1_usvt.py --setting_dir ./sim_data_batch/A1_poly_feats --out_dir ./results_usvt/A1_poly_feats_D2 --d_max 2
 ```
 
 ### Visualisation
@@ -137,7 +137,7 @@ Windows
 
 recon both
 ```bash
-python exp1_test_batch.py --setting_dir ./sim_data_batch/A1_poly_feats --ckpt ./results/0905_1558_A1_poly_feats/rg_vae_A1_poly_feats_best.pt --model RG-G-VAE --latent_dim 2 --hidden 128 --decoder rff --decoder_kwargs "{\"num_features\":1024,\"lengthscale\":1.2,\"ard\":true,\"learn_lengthscale\":true,\"learn_omegas\":false,\"seed\":0}" --feat_dec_hidden 128
+python exp1_test_batch.py --setting_dir ./sim_data_batch/A1_poly_feats --ckpt ./results/0903_2227_A1_poly_feats/rg_vae_A1_poly_feats_best.pt --model RG-G-VAE --latent_dim 32 --hidden 128 --decoder rff --decoder_kwargs "{\"num_features\":1024,\"lengthscale\":1.2,\"ard\":true,\"learn_lengthscale\":true,\"learn_omegas\":false,\"seed\":0}" --feat_dec_hidden 128
 ```
 
 recon feats only

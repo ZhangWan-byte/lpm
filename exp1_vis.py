@@ -84,8 +84,10 @@ def zhat_dim(zhat_path: str):
 def load_rgvae_store(root: str):
     """
     Returns: dict graph -> list of entries
-    entry = { "gwd":..., "lp_rmse":..., "n_nodes":..., "zhat_path":..., "json_path":... }
-    D is inferred from the zhat file at draw time.
+    entry = {
+        "gwd":..., "lp_rmse":..., "auc_1to1":..., "ap_1to1":...,
+        "n_nodes":..., "zhat_path":..., "json_path":...
+    }
     Only keeps entries whose graph name contains '_test_'.
     """
     store = {}
@@ -97,11 +99,13 @@ def load_rgvae_store(root: str):
             print(f"[RGVAE WARN] skip {jp}: {e}"); continue
         for d in data.get("details", []):
             g = d.get("graph"); zrel = d.get("zhat_path")
-            if not g or not zrel or "_test_" not in g: 
+            if not g or not zrel or "_test_" not in g:
                 continue
             store.setdefault(g, []).append({
                 "gwd": d.get("gwd"),
                 "lp_rmse": d.get("lp_rmse"),
+                "auc_1to1": d.get("auc_1to1"),
+                "ap_1to1": d.get("ap_1to1"),
                 "n_nodes": d.get("n_nodes"),
                 "zhat_path": resolve_rel(jp, zrel),
                 "json_path": jp,
@@ -111,7 +115,10 @@ def load_rgvae_store(root: str):
 def load_baseline_store(method: str, cfg: dict):
     """
     Returns: dict D -> dict graph -> entry
-    entry = { "gwd":..., "lp_rmse":..., "n_nodes":..., "zhat_path":..., "json_path":... }
+    entry = {
+        "gwd":..., "lp_rmse":..., "auc_1to1":..., "ap_1to1":...,
+        "n_nodes":..., "zhat_path":..., "json_path":...
+    }
     Only keeps entries whose graph name contains '_test_'.
     """
     out = {}
@@ -132,6 +139,8 @@ def load_baseline_store(method: str, cfg: dict):
             level[g] = {
                 "gwd": d.get("gwd"),
                 "lp_rmse": d.get("lp_rmse"),
+                "auc_1to1": d.get("auc_1to1"),
+                "ap_1to1": d.get("ap_1to1"),
                 "n_nodes": d.get("n_nodes"),
                 "zhat_path": os.path.normpath(zpath),
                 "json_path": jp,
@@ -207,8 +216,15 @@ def render_grid_for_graph(graph: str,
 
             gwd = _fmt(entry.get("gwd"))
             rmse_local = _fmt(entry.get("lp_rmse"))
+            auc11 = _fmt(entry.get("auc_1to1"))
+            ap11 = _fmt(entry.get("ap_1to1"))
             n_nodes = entry.get("n_nodes", "?")
-            ax.set_title(f"{method}: D={want_D}, n={n_nodes}\nGWD={gwd} | LP-RMSE={rmse_local}", fontsize=9)
+            ax.set_title(
+                f"{method}: D={want_D}, n={n_nodes}\n"
+                f"GWD={gwd} | LP-RMSE={rmse_local}\n"
+                f"AUC(1:1)={auc11} | AP(1:1)={ap11}",
+                fontsize=9
+            )
 
         except Exception as e:
             ax.set_title(f"{method}: D={want_D} (error)", fontsize=9)

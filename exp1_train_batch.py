@@ -31,6 +31,7 @@ except Exception:
 import numpy as np
 import torch
 import ot  # Python Optimal Transport (POT)
+from sklearn.decomposition import PCA
 
 from models.rg_vae import RG_VAE, RG_P_VAE
 from models.utils import (
@@ -281,8 +282,23 @@ def compute_gwd_ignr(model: "RG_VAE",
         gws.append(float(gw2))
     return float(np.mean(gws))
 
+# def procrustes_rmse(Z_true: np.ndarray, Z_hat: np.ndarray, center: bool = False, scale: bool = False) -> float:
+#     """Optional LP-RMSE for reference (uses orthogonal Procrustes)."""
+#     X = Z_true.astype(np.float64)
+#     Y = Z_hat.astype(np.float64)
+#     if center:
+#         X -= X.mean(axis=0, keepdims=True)
+#         Y -= Y.mean(axis=0, keepdims=True)
+#     if scale:
+#         X /= max(np.linalg.norm(X), 1e-12)
+#         Y /= max(np.linalg.norm(Y), 1e-12)
+#     U, _, Vt = np.linalg.svd(Y.T @ X, full_matrices=False)
+#     R = U @ Vt
+#     aligned = Y @ R
+#     return float(np.sqrt(np.mean((aligned - X) ** 2))), aligned
+
 def procrustes_rmse(Z_true: np.ndarray, Z_hat: np.ndarray, center: bool = False, scale: bool = False) -> float:
-    """Optional LP-RMSE for reference (uses orthogonal Procrustes)."""
+    """PCA + RMSE."""
     X = Z_true.astype(np.float64)
     Y = Z_hat.astype(np.float64)
     if center:
@@ -291,10 +307,9 @@ def procrustes_rmse(Z_true: np.ndarray, Z_hat: np.ndarray, center: bool = False,
     if scale:
         X /= max(np.linalg.norm(X), 1e-12)
         Y /= max(np.linalg.norm(Y), 1e-12)
-    U, _, Vt = np.linalg.svd(Y.T @ X, full_matrices=False)
-    R = U @ Vt
-    aligned = Y @ R
-    return float(np.sqrt(np.mean((aligned - X) ** 2))), aligned
+    # PCA alignment
+    Y = PCA(n_components=X.shape[1]).fit_transform(Y)
+    return float(np.sqrt(np.mean((Y - X) ** 2))), Y
 
 # ----------------- CLI -----------------
 
