@@ -20,7 +20,7 @@ import ot  # POT
 
 # Reuse helpers from your training code
 from exp1_train_batch import (
-    list_graph_dirs, load_node_features, load_true_positions, procrustes_rmse,
+    list_graph_dirs, load_node_features, load_true_positions, procrustes_rmse, pca_rmse,
     _posterior_sample_latents, build_model, _subsample_indices, _pairwise_euclidean
 )
 from models.utils import load_graph_dir, build_sparse_adj, negative_sampling, auc_ap
@@ -178,6 +178,8 @@ def parse_args():
     ap.add_argument("--use_struct_feats", action="store_true")
 
     # eval knobs
+    ap.add_argument("--rmse", default="procrustes", choices=["procrustes","pca"],
+                    help="How to align before LP-RMSE: Procrustes (default) or PCA.")
     ap.add_argument("--gwd_nodes", type=int, default=2000)
     ap.add_argument("--lp_nodes", type=int, default=5000)
     ap.add_argument("--max_graphs", type=int, default=0)
@@ -235,7 +237,12 @@ def main():
         # LP-RMSE (RMSE after Procrustes) on (optionally) subsampled nodes
         k = min(Z_true.shape[0], args.lp_nodes) if args.lp_nodes > 0 else Z_true.shape[0]
         idx = np.arange(Z_true.shape[0]) if k==Z_true.shape[0] else np.sort(np.random.default_rng(args.seed).choice(Z_true.shape[0], size=k, replace=False))
-        rmse, Z_reduced = procrustes_rmse(Z_true[idx], Z_hat[idx], center=False, scale=False)
+        if args.rmse == 'procrustes':
+            rmse, Z_reduced = procrustes_rmse(Z_true[idx], Z_hat[idx], center=True, scale=True)
+        elif args.rmse == 'pca':
+            rmse, Z_reduced = pca_rmse(Z_true[idx], Z_hat[idx], center=False, scale=False)
+        else:
+            raise ValueError(f"Unknown --rmse {args.rmse}")
 
         # ---- metrics reusing the saved inference ----
         gwd = gwd_from_positions(Z_true, Z_hat=Z_reduced, max_nodes=args.gwd_nodes, seed=args.seed, center=args.center)

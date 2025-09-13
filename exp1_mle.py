@@ -10,7 +10,7 @@ Usage:
 """
 
 import os, json, argparse, random, numpy as np, torch, torch.nn.functional as F
-from exp1_train_batch import list_graph_dirs, load_true_positions, procrustes_rmse
+from exp1_train_batch import list_graph_dirs, load_true_positions, procrustes_rmse, pca_rmse
 from exp1_test_batch import gwd_from_positions, _all_non_edges_pairs  # reuse helpers
 from models.utils import load_graph_dir, negative_sampling, auc_ap
 
@@ -173,6 +173,8 @@ def parse_args():
     ap.add_argument("--block_size", type=int, default=512)
 
     # metrics
+    ap.add_argument("--rmse", default="procrustes", choices=["procrustes","pca"],
+                    help="How to align before LP-RMSE: Procrustes (default) or PCA.")
     ap.add_argument("--gwd_nodes", type=int, default=2000)
     ap.add_argument("--lp_nodes", type=int, default=5000)
     ap.add_argument("--center", action="store_true")
@@ -209,8 +211,14 @@ def main():
         # LP-RMSE (subsample if needed)
         k = min(Z_true.shape[0], args.lp_nodes) if args.lp_nodes > 0 else Z_true.shape[0]
         idx = np.arange(Z_true.shape[0]) if k==Z_true.shape[0] else np.sort(np.random.default_rng(args.seed).choice(Z_true.shape[0], k, replace=False))
-        lp_rmse, Z_red = procrustes_rmse(Z_true[idx], Z_hat[idx], center=False, scale=False)
-
+        # lp_rmse, Z_red = procrustes_rmse(Z_true[idx], Z_hat[idx], center=False, scale=False)
+        if args.rmse == 'procrustes':
+            lp_rmse, Z_red = procrustes_rmse(Z_true[idx], Z_hat[idx], center=True, scale=True)
+        elif args.rmse == 'pca':
+            lp_rmse, Z_red = pca_rmse(Z_true[idx], Z_hat[idx], center=False, scale=False)
+        else:
+            raise ValueError(f"Unknown --rmse {args.rmse}")
+        
         gwd = gwd_from_positions(Z_true, Z_red, max_nodes=args.gwd_nodes, seed=args.seed, center=args.center)
         kern = kernel_metrics(Z_hat, np.asarray(edges, dtype=np.int64), N, undirected, device, args.ap_chunk_size)
 

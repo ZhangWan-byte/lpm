@@ -282,22 +282,22 @@ def compute_gwd_ignr(model: "RG_VAE",
         gws.append(float(gw2))
     return float(np.mean(gws))
 
-# def procrustes_rmse(Z_true: np.ndarray, Z_hat: np.ndarray, center: bool = False, scale: bool = False) -> float:
-#     """Optional LP-RMSE for reference (uses orthogonal Procrustes)."""
-#     X = Z_true.astype(np.float64)
-#     Y = Z_hat.astype(np.float64)
-#     if center:
-#         X -= X.mean(axis=0, keepdims=True)
-#         Y -= Y.mean(axis=0, keepdims=True)
-#     if scale:
-#         X /= max(np.linalg.norm(X), 1e-12)
-#         Y /= max(np.linalg.norm(Y), 1e-12)
-#     U, _, Vt = np.linalg.svd(Y.T @ X, full_matrices=False)
-#     R = U @ Vt
-#     aligned = Y @ R
-#     return float(np.sqrt(np.mean((aligned - X) ** 2))), aligned
+def procrustes_rmse(Z_true: np.ndarray, Z_hat: np.ndarray, center: bool = True, scale: bool = True) -> float:
+    """Optional LP-RMSE for reference (uses orthogonal Procrustes)."""
+    X = Z_true.astype(np.float64)
+    Y = Z_hat.astype(np.float64)
+    if center:
+        X -= X.mean(axis=0, keepdims=True)
+        Y -= Y.mean(axis=0, keepdims=True)
+    if scale:
+        X /= max(np.linalg.norm(X), 1e-12)
+        Y /= max(np.linalg.norm(Y), 1e-12)
+    U, _, Vt = np.linalg.svd(Y.T @ X, full_matrices=False)
+    R = U @ Vt
+    aligned = Y @ R
+    return float(np.sqrt(np.mean((aligned - X) ** 2))), aligned
 
-def procrustes_rmse(Z_true: np.ndarray, Z_hat: np.ndarray, center: bool = False, scale: bool = False) -> float:
+def pca_rmse(Z_true: np.ndarray, Z_hat: np.ndarray, center: bool = False, scale: bool = False) -> float:
     """PCA + RMSE."""
     X = Z_true.astype(np.float64)
     Y = Z_hat.astype(np.float64)
